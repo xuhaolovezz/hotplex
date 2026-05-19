@@ -1,5 +1,31 @@
 # Changelog
 
+## [1.16.0] - 2026-05-20
+
+### Summary
+
+v1.16.0 是一次 minor 版本更新，聚焦于 **第三 Worker 接入** 和 **管理后台**。新增 OpenAI Codex CLI Worker（exec + app-server 双模式），支持 GPT-5/o4 系列模型通过 Web/Slack/飞书使用；Agent Bot Management WebUI 提供完整的可视化管理（Bot CRUD、配置编辑、Prompt 预览、Session/Cron 管理）。EventStore 从 SQLite 视图升级为物化 turns 表（含 cache token 拆分），Claude Code input token 统计修复使其准确计入缓存 token（影响 35-60% 的用量数据）。
+
+### Added
+
+- **Worker**: Codex CLI Worker — third worker type supporting `codex exec --json` (one-shot) and `codex app-server` (persistent JSON-RPC) dual modes, with 11 TurnItem → AEP event mapping, lazy-start singleton process with ref counting and 30m idle drain. (#450)
+- **WebChat UI**: Agent Bot Management WebUI — dashboard, bot list/detail/create/delete, agent config editor (SOUL/AGENTS/SKILLS/USER/MEMORY), system prompt preview, session management, cron management, and connection settings. (#453)
+- **Admin API**: Bot config CRUD and agent config file management — `BotConfigProvider` adapter bridging admin API to messaging config, with scope hierarchy (`admin:write` → `admin:read` → `config:read`). (#453)
+
+### Changed
+
+- **EventStore**: Replace turns views with materialized table — pre-computed turns table written at done/input time via Collector dual-channel, replacing expensive SQLite views (13+ json_extract per row + window functions). Breaking: `TurnRecord.ID string→int64`, `before_seq→before_id` API param, new `generation`/`turn_num`/cache token fields. (#456)
+- **EventStore**: Buffer and aggregate reasoning events — extend delta accumulator pattern to reasoning chunks, reducing SQLite writes from N rows per reasoning block to 1 merged row. (#455)
+- **Configuration**: Change events retention default from 7 to 30 days (168h → 720h). (#456)
+
+### Fixed
+
+- **Gateway Core**: Include cache tokens in Claude Code input token accounting — Anthropic API reports `input_tokens + cache_creation_input_tokens + cache_read_input_tokens` as separate fields; previously only `input_tokens` was counted, dropping ~35-60% of actual usage. (#456)
+- **Worker**: OCS HTTP POST 30s timeout falsely reported "server unreachable" — split error classification into `isTimeoutError`/`isUnreachableError`, add dedicated 5min sendClient for input delivery. (#449)
+- **Messaging**: CardKit empty flush triggering field validation error (99992402) — skip flush when content is empty but lastFlushed has content. (#449)
+- **Messaging**: Messaging bridge event drop — swap `StartPlatformSession`/`JoinPlatformSession` call order so platform conn is registered before state transitions. (#449)
+- **Worker**: Codex CLI app-server mode `appConn.Send` bypassed JSON-RPC by writing raw AEP to stdin — replaced with `ErrNotImplemented` fail-fast. (#458)
+
 ## [1.15.0] - 2026-05-18
 
 ### Summary
