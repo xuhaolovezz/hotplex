@@ -266,15 +266,21 @@ func (m *Mapper) mapNotifApproval(params json.RawMessage) []*events.Envelope {
 	var p struct {
 		RequestID string `json:"requestId"`
 		ToolName  string `json:"toolName"`
+		Reason    string `json:"reason,omitempty"`
 	}
 	if err := json.Unmarshal(params, &p); err != nil {
 		return nil
 	}
+	desc := p.ToolName
+	if p.Reason != "" {
+		desc = p.Reason
+	}
+
 	return []*events.Envelope{
 		newEnvelope(events.PermissionRequest, events.PermissionRequestData{
 			ID:          p.RequestID,
 			ToolName:    p.ToolName,
-			Description: p.ToolName,
+			Description: desc,
 		}, m.sessionID, m.nextSeq()),
 	}
 }
