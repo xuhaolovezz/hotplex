@@ -519,6 +519,13 @@ func applyBotAttrsToSlack(bot *config.SlackBotConfig, attrs *admin.BotConfigAttr
 			bot.Voice = attrs.TTS.Voice
 		}
 	}
+	// Credentials
+	if attrs.BotToken != "" {
+		bot.BotToken = attrs.BotToken
+	}
+	if attrs.AppToken != "" {
+		bot.AppToken = attrs.AppToken
+	}
 }
 
 // applyBotAttrsToFeishu applies non-zero/non-nil fields from attrs to the Feishu bot config.
@@ -557,6 +564,13 @@ func applyBotAttrsToFeishu(bot *config.FeishuBotConfig, attrs *admin.BotConfigAt
 		if attrs.TTS.Voice != "" {
 			bot.Voice = attrs.TTS.Voice
 		}
+	}
+	// Credentials
+	if attrs.AppID != "" {
+		bot.AppID = attrs.AppID
+	}
+	if attrs.AppSecret != "" {
+		bot.AppSecret = attrs.AppSecret
 	}
 }
 

@@ -317,7 +317,6 @@ type SlackBotConfig struct {
 	Name       string `mapstructure:"name"`
 	BotToken   string `mapstructure:"bot_token"`
 	AppToken   string `mapstructure:"app_token"`
-	Soul       string `mapstructure:"soul,omitempty"`
 	WorkerType string `mapstructure:"worker_type,omitempty"`
 	WorkDir    string `mapstructure:"work_dir,omitempty"`
 
@@ -352,7 +351,6 @@ type FeishuBotConfig struct {
 	Name       string `mapstructure:"name"`
 	AppID      string `mapstructure:"app_id"`
 	AppSecret  string `mapstructure:"app_secret"`
-	Soul       string `mapstructure:"soul,omitempty"`
 	WorkerType string `mapstructure:"worker_type,omitempty"`
 	WorkDir    string `mapstructure:"work_dir,omitempty"`
 
@@ -1012,6 +1010,14 @@ func loadRecursive(filePath string, opts LoadOptions, visited []string) (*Config
 				slog.Warn("config: HOTPLEX_JWT_SECRET set but invalid format (must be 32-byte raw or base64-encoded 32 bytes)", "length", len(secret))
 			}
 		}
+	}
+
+	// Expand env vars in token slices (supports ${VAR} references in config files).
+	for i, t := range cfg.Admin.Tokens {
+		cfg.Admin.Tokens[i] = ExpandEnv(t)
+	}
+	for i, k := range cfg.Security.APIKeys {
+		cfg.Security.APIKeys[i] = ExpandEnv(k)
 	}
 
 	// Numbered environment variables for slices (e.g. HOTPLEX_ADMIN_TOKEN_1..N)

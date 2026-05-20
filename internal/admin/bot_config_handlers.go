@@ -271,6 +271,19 @@ func extractBotConfigAttrs(body map[string]any) *BotConfigAttrs {
 			attrs.TTS = ttsAttrs
 		}
 	}
+	// Credentials
+	if v, ok := body["bot_token"].(string); ok {
+		attrs.BotToken = v
+	}
+	if v, ok := body["app_token"].(string); ok {
+		attrs.AppToken = v
+	}
+	if v, ok := body["app_id"].(string); ok {
+		attrs.AppID = v
+	}
+	if v, ok := body["app_secret"].(string); ok {
+		attrs.AppSecret = v
+	}
 	return attrs
 }
 
