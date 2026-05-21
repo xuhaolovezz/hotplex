@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -54,6 +55,8 @@ type GatewayDeps struct {
 	ConfigWatcher   *config.Watcher
 	CronScheduler   *cron.Scheduler
 	ChatAccessStore *messaging.ChatAccessStore
+	DB              *sql.DB
+	DBResolver      *security.DBResolver
 }
 
 const defaultConfigPath = config.DefaultConfigPath
@@ -189,6 +192,19 @@ func runGateway(configPath string, devMode bool, stopCh <-chan struct{}) (err er
 	}
 	auth := security.NewAuthenticator(&cfg.Security, jwtValidator)
 
+	// API key → user identity resolver: YAML config takes priority over DB (Admin API CRUD).
+	// ChainResolver tries config map first, falls back to DB. Either source may be empty.
+	dbResolver := security.NewDBResolver(stores.session.DB())
+	if len(cfg.ResolvedAPIKeyUsers) > 0 {
+		mapResolver := security.NewMapResolver(cfg.ResolvedAPIKeyUsers)
+		auth.SetKeyResolver(security.NewChainResolver(mapResolver, dbResolver))
+		log.Info("gateway: API key resolver: config → database",
+			"mapped_config_keys", len(cfg.ResolvedAPIKeyUsers))
+	} else {
+		auth.SetKeyResolver(dbResolver)
+		log.Info("gateway: API key resolver: database")
+	}
+
 	retryCtrl := gateway.NewLLMRetryController(cfg.Worker.AutoRetry, log)
 
 	agentConfigDir := ""
@@ -245,6 +261,19 @@ func runGateway(configPath string, devMode bool, stopCh <-chan struct{}) (err er
 	cfgStore.RegisterFunc(func(prev, next *config.Config) {
 		if !reflect.DeepEqual(prev.Security.APIKeys, next.Security.APIKeys) {
 			auth.ReloadKeys(&next.Security)
+		}
+	})
+
+	cfgStore.RegisterFunc(func(prev, next *config.Config) {
+		if !reflect.DeepEqual(prev.ResolvedAPIKeyUsers, next.ResolvedAPIKeyUsers) {
+			dbR := security.NewDBResolver(stores.session.DB())
+			if len(next.ResolvedAPIKeyUsers) > 0 {
+				auth.SetKeyResolver(security.NewChainResolver(security.NewMapResolver(next.ResolvedAPIKeyUsers), dbR))
+			} else {
+				auth.SetKeyResolver(dbR)
+			}
+			log.Info("config: API key resolver updated",
+				"mapped_config_keys", len(next.ResolvedAPIKeyUsers))
 		}
 	})
 	cfgStore.RegisterFunc(func(prev, next *config.Config) {
@@ -329,6 +358,8 @@ func runGateway(configPath string, devMode bool, stopCh <-chan struct{}) (err er
 		ConfigWatcher:   configWatcher,
 		CronScheduler:   cronScheduler,
 		ChatAccessStore: messaging.NewChatAccessStore(stores.session.DB(), log),
+		DB:              stores.session.DB(),
+		DBResolver:      dbResolver,
 	}
 
 	// Brain: lightweight LLM layer for TTS summarization (fail-open).
