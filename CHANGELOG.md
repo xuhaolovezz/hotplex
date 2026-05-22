@@ -1,10 +1,10 @@
 # Changelog
 
-## [Unreleased]
+## [1.18.0] - 2026-05-22
 
 ### Summary
 
-移除 JWT 认证依赖，替换为 API Key + Bot ID 认证模型。这是一次 **Breaking Change**，影响所有 WebSocket 客户端和 SDK 用户。
+v1.18.0 是一次 minor 版本更新，聚焦于 **认证架构简化** 和 **飞书交互增强**。移除 ES256 JWT 签名体系（~3800 行），替换为 API Key + Bot ID 双字段认证模型，降低部署复杂度并消除密钥管理负担。API Key 验证使用 `subtle.ConstantTimeCompare` 防止时序攻击，resolver 调用移至锁外避免阻塞。飞书 AskUserQuestion 新增 CardKit v2 按钮交互（copy_text 一键复制选项），支持多选题提示。
 
 ### Breaking Changes
 
@@ -28,10 +28,21 @@
 
 #### 配置 API 变更
 
-- `config.Load(path, LoadOptions{})` → `config.Load(path)` — 移除 `LoadOptions` 和 `SecretsProvider` 管道（`EnvSecretsProvider`, `ChainedSecretsProvider`）。配置加载仅通过 Viper `AutomaticEnv` 绑定 `HOTPLEX_*` 环境变量。
+- `config.Load(path, LoadOptions{})` → `config.Load(path)` — 移除 `LoadOptions` 和 `SecretsProvider` 管道。
 - `config.NewWatcher(log, path, sp, store, ...)` → `config.NewWatcher(log, path, store, ...)` — 移除 `SecretsProvider` 参数。
 - `security.NewAuthenticator(cfg, jwtValidator)` → `security.NewAuthenticator(cfg)` — 移除 JWT validator 参数。
-- `security.BotIDFromHeader(r)` → `security.BotIDFromRequest(r)` — 重命名以反映其同时读取 header 和 query param。
+- `security.BotIDFromHeader(r)` → `security.BotIDFromRequest(r)` — 重命名以反映同时读取 header 和 query param。
+
+### Added
+
+- **Messaging/Feishu**: AskUserQuestion CardKit v2 按钮交互 — `copy_text` action 元素替代 markdown 列表，用户点击按钮即可复制选项文本，支持多选题提示和编号回退列表。(#474)
+
+### Changed
+
+- **Security**: API Key 验证改用 `subtle.ConstantTimeCompare` 防止时序攻击（SEC-001）。(#476)
+- **Security**: `AuthenticateRequest` 将 resolver 调用移到读锁外，避免外部网络调用阻塞（CONC-004）。(#476)
+- **Security**: 移除 `cliProtectedVars` 中已废弃的 `GATEWAY_TOKEN` 条目，同步更新 Env-Whitelist 文档。(#476)
+- **Security**: `BotIDFromRequest` 添加信任边界文档注释（SEC-003），明确 Bot ID 未与 API Key 密码学绑定的设计决策。(#476)
 
 ### Removed
 
@@ -39,16 +50,22 @@
 - `client/token.go` — Go SDK JWT token 生成。(#467)
 - `client/scripts/gen-token/` — Go SDK token 生成命令行工具。(#467)
 - `client/examples/08_token_generator/` — Go SDK token 生成示例。(#467)
-- `internal/cli/checkers/security_fix_test.go` — JWT 强度检查测试。(#467)
 - `examples/typescript-client/scripts/generate-test-token.ts` — TS SDK JWT token 生成脚本。(#467)
 - `examples/java-client/src/main/java/dev/hotplex/security/JwtTokenGenerator.java` — Java SDK JWT 生成器。(#467)
 - `golang-jwt/jwt/v5` 依赖 — 不再需要。(#467)
 - `jjwt-api/impl/jackson` + `bcprov-jdk18on` 依赖（Java SDK） — 不再需要。(#467)
 
-### Changed
+### Fixed
 
-- `security.AuthenticateRequest()` 内 `BotIDFromRequest` 调用从 2 次优化为 1 次（提取到局部变量）。(#467)
-- `conn.go` 中 `context.TODO()` 替换为 `context.Background()`（与同函数其他路径一致）。(#467)
+- **Messaging/Feishu**: JSON 1.0/2.0 兼容性 — 交互卡片使用 JSON 1.0 以支持 `action` + `copy_text` 元素（JSON 2.0 不支持）。(#474)
+- **Messaging/Feishu**: 选项文本经 `SanitizeText()` 清洗，防止注入。(#474)
+- **SDK/Java**: `QuickStart.java` 变量名 `signingKey` 修正为 `apiKey`。(#476)
+- **Docs**: `integration-patterns.md` SDK 伪代码更新为实际 API（`client.APIKey()`/`client.BotID()`）。(#476)
+
+### Security
+
+- API Key 恒定时间比较（`subtle.ConstantTimeCompare`），替代 `map[string]bool` lookup，消除时序攻击面。(#476)
+- 移除 JWT JTI 黑名单 sweep goroutine 和 HKDF 密钥派生，减少攻击面和资源开销。(#467)
 
 ### Migration Guide
 
