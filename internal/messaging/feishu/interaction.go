@@ -67,40 +67,24 @@ func (c *FeishuConn) sendPermissionRequest(ctx context.Context, env *events.Enve
 	return nil
 }
 
-// sendQuestionRequest posts a question request card to Feishu.
+// sendQuestionRequest posts a question request card using JSON 1.0 format
+// (required for action + copy_text interactive buttons).
 func (c *FeishuConn) sendQuestionRequest(ctx context.Context, env *events.Envelope) error {
 	data, err := messaging.ExtractQuestionData(env)
 	if err != nil {
 		return fmt.Errorf("feishu: extract question data: %w", err)
 	}
 
-	var sb strings.Builder
-	for _, q := range data.Questions {
-		headerLabel := q.Header
-		if headerLabel == "" {
-			headerLabel = "Question"
-		}
-		fmt.Fprintf(&sb, "**%s**\n%s\n", headerLabel, q.Question)
+	elements := buildQuestionElements(data.Questions)
+	elements = append(elements,
+		map[string]any{"tag": "hr"},
+		map[string]any{"tag": "markdown", "content": questionFooterHint(data.Questions)},
+	)
 
-		// List options
-		if len(q.Options) > 0 {
-			for _, opt := range q.Options {
-				label := opt.Label
-				if opt.Description != "" {
-					label += " — " + opt.Description
-				}
-				fmt.Fprintf(&sb, "- %s\n", label)
-			}
-		}
-		sb.WriteString("\n")
-	}
-
-	footer := "---\n💬 回复选项文本或自定义答案来响应此问题"
-
-	cardJSON := buildInteractionCard(sb.String(), footer, cardHeader{
+	cardJSON := buildV1Card(cardHeader{
 		Title:    "用户输入请求",
 		Template: headerYellow,
-	})
+	}, map[string]any{"wide_screen_mode": true}, elements)
 
 	chatID := c.chatID
 	if err := c.adapter.sendCardMessage(ctx, chatID, cardJSON); err != nil {
@@ -365,18 +349,19 @@ func buildQuestionFallbackText(data *events.QuestionRequestData) string {
 	sb.WriteString("❓ 问题请求\n")
 
 	for i, q := range data.Questions {
-		headerLabel := q.Header
+		headerLabel := messaging.SanitizeText(q.Header)
 		if headerLabel == "" {
 			headerLabel = "Question"
 		}
-		fmt.Fprintf(&sb, "\n%s %d: %s\n", headerLabel, i+1, q.Question)
+		fmt.Fprintf(&sb, "\n%s %d: %s\n", headerLabel, i+1, messaging.SanitizeText(q.Question))
 
 		if len(q.Options) > 0 {
 			sb.WriteString("选项:\n")
 			for j, opt := range q.Options {
-				label := opt.Label
-				if opt.Description != "" {
-					label += " — " + opt.Description
+				label := messaging.SanitizeText(opt.Label)
+				desc := messaging.SanitizeText(opt.Description)
+				if desc != "" {
+					label += " — " + desc
 				}
 				fmt.Fprintf(&sb, "  %d. %s\n", j+1, label)
 			}
@@ -384,6 +369,12 @@ func buildQuestionFallbackText(data *events.QuestionRequestData) string {
 	}
 
 	sb.WriteString("\n回复选项文本或自定义答案来响应此问题")
+	for _, q := range data.Questions {
+		if q.MultiSelect {
+			sb.WriteString("\n提示: 此问题支持多选，可一次发送多个选项")
+			break
+		}
+	}
 	return sb.String()
 }
 
