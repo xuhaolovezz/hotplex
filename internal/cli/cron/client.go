@@ -44,13 +44,13 @@ func OpenStore(ctx context.Context, configPath string) (cron.Store, *eventstore.
 		return nil, nil, nil, err
 	}
 
-	ss, err := session.NewSQLiteStore(ctx, cfg)
+	ss, err := session.NewSQLiteStore(ctx, cfg, nil)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("open session store: %w", err)
 	}
 
-	cronStore := cron.NewSQLiteStore(ss.DB(), slog.Default())
-	evStore := eventstore.NewSQLiteStore(ss.DB())
+	cronStore := cron.NewSQLiteStore(ss.DB(), slog.Default(), nil)
+	evStore := eventstore.NewSQLiteStore(ss.DB(), nil)
 	cleanup := func() { _ = ss.Close() }
 
 	return cronStore, evStore, cleanup, nil
@@ -162,6 +162,9 @@ func resolvePlatform(cliPlatform string, cliPlatformKey map[string]string) (stri
 		key := map[string]string{}
 		if chatID := os.Getenv("GATEWAY_CHANNEL_ID"); chatID != "" {
 			key["chat_id"] = chatID
+		}
+		if msgID := os.Getenv("GATEWAY_THREAD_ID"); msgID != "" {
+			key["message_id"] = msgID
 		}
 		return "feishu", key
 	}

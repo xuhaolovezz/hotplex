@@ -229,13 +229,13 @@ func (a *Adapter) replyOrSend(ctx context.Context, msgID, chatID, text string) e
 }
 
 // SendCronResult delivers a cron job result to a Feishu chat.
+// When message_id is present in platformKey, replies to that message (thread delivery).
 func (a *Adapter) SendCronResult(ctx context.Context, text string, platformKey map[string]string) error {
 	chatID := platformKey["chat_id"]
 	if chatID == "" {
 		return fmt.Errorf("feishu: missing chat_id in platform_key")
 	}
-	text = messaging.SanitizeText(text)
-	return a.sendTextMessage(ctx, chatID, text)
+	return a.replyOrSend(ctx, platformKey["message_id"], chatID, messaging.SanitizeText(text))
 }
 
 func (a *Adapter) sendTextMessage(ctx context.Context, chatID, text string) error {

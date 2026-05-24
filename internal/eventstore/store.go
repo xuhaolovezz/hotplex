@@ -194,10 +194,13 @@ type EventStore interface {
 }
 
 // EventTx is a transaction handle for batch event and turn writes.
+// Callers MUST call either Commit or Rollback to release the underlying
+// write lock — failure to do so will deadlock all subsequent writes.
 type EventTx interface {
 	Append(ctx context.Context, event *StoredEvent) error
 	AppendTurn(ctx context.Context, turn *TurnWriteRequest) error
 	Commit() error
+	Rollback() error
 }
 
 // TurnQuerier provides read-only access to conversation turn records.
@@ -211,16 +214,17 @@ type TurnQuerier interface {
 
 // SQLiteStore implements EventStore using a shared SQLite database connection.
 type SQLiteStore struct {
-	db     *sql.DB
-	ownsDB bool // true only when opened independently (tests); false when sharing session store DB.
+	db      *sql.DB
+	ownsDB  bool // true only when opened independently (tests); false when sharing session store DB.
+	writeMu *sqlutil.WriteMu
 }
 
 var _ EventStore = (*SQLiteStore)(nil)
 
 // NewSQLiteStore creates an event store using a shared *sql.DB.
 // The schema is managed by the session store goose migrations (002_events_table.sql).
-func NewSQLiteStore(db *sql.DB) *SQLiteStore {
-	return &SQLiteStore{db: db, ownsDB: false}
+func NewSQLiteStore(db *sql.DB, writeMu *sqlutil.WriteMu) *SQLiteStore {
+	return &SQLiteStore{db: db, ownsDB: false, writeMu: writeMu}
 }
 
 // NewIndependentStore opens its own DB for testing.
@@ -238,26 +242,46 @@ func NewIndependentStore(dbPath string) (*SQLiteStore, error) {
 func (s *SQLiteStore) Append(ctx context.Context, event *StoredEvent) error {
 	ctx, cancel := withDefaultTimeout(ctx)
 	defer cancel()
-	_, err := s.db.ExecContext(ctx, queries["insert"],
-		event.SessionID, event.Seq, event.Type, event.Data, event.Direction, event.Source, event.CreatedAt)
-	if err != nil {
-		return fmt.Errorf("eventstore: append: %w", err)
-	}
-	return nil
+	return s.writeMu.WithLock(func() error {
+		_, err := s.db.ExecContext(ctx, queries["insert"],
+			event.SessionID, event.Seq, event.Type, event.Data, event.Direction, event.Source, event.CreatedAt)
+		if err != nil {
+			return fmt.Errorf("eventstore: append: %w", err)
+		}
+		return nil
+	})
 }
 
 func (s *SQLiteStore) BeginTx(ctx context.Context) (EventTx, error) {
+	if s.writeMu != nil {
+		s.writeMu.Lock()
+	}
 	ctx, cancel := withDefaultTimeout(ctx)
 	defer cancel()
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
+		if s.writeMu != nil {
+			s.writeMu.Unlock()
+		}
 		return nil, fmt.Errorf("eventstore: begin tx: %w", err)
 	}
-	return &sqliteTx{tx: tx}, nil
+	return &sqliteTx{tx: tx, writeMu: s.writeMu}, nil
 }
 
 type sqliteTx struct {
-	tx *sql.Tx
+	tx       *sql.Tx
+	writeMu  *sqlutil.WriteMu
+	released bool
+}
+
+func (t *sqliteTx) release() {
+	if t.released {
+		return
+	}
+	t.released = true
+	if t.writeMu != nil {
+		t.writeMu.Unlock()
+	}
 }
 
 func (t *sqliteTx) Append(ctx context.Context, event *StoredEvent) error {
@@ -290,7 +314,15 @@ func (t *sqliteTx) AppendTurn(ctx context.Context, turn *TurnWriteRequest) error
 }
 
 func (t *sqliteTx) Commit() error {
-	return t.tx.Commit()
+	err := t.tx.Commit()
+	t.release()
+	return err
+}
+
+func (t *sqliteTx) Rollback() error {
+	err := t.tx.Rollback()
+	t.release()
+	return err
 }
 
 func (s *SQLiteStore) QueryBySession(ctx context.Context, sessionID string, cursor int64, dir CursorDirection, limit int) (*EventPage, error) {
@@ -363,21 +395,28 @@ func (s *SQLiteStore) QueryBySession(ctx context.Context, sessionID string, curs
 func (s *SQLiteStore) DeleteBySession(ctx context.Context, sessionID string) error {
 	ctx, cancel := withDefaultTimeout(ctx)
 	defer cancel()
-	_, err := s.db.ExecContext(ctx, queries["delete_by_session"], sessionID)
-	if err != nil {
-		return fmt.Errorf("eventstore: delete by session: %w", err)
-	}
-	return nil
+	return s.writeMu.WithLock(func() error {
+		_, err := s.db.ExecContext(ctx, queries["delete_by_session"], sessionID)
+		if err != nil {
+			return fmt.Errorf("eventstore: delete by session: %w", err)
+		}
+		return nil
+	})
 }
 
 func (s *SQLiteStore) DeleteExpired(ctx context.Context, cutoff time.Time) (int64, error) {
 	ctx, cancel := withDefaultTimeout(ctx)
 	defer cancel()
-	res, err := s.db.ExecContext(ctx, queries["delete_expired"], cutoff.UnixMilli())
-	if err != nil {
-		return 0, fmt.Errorf("eventstore: delete expired: %w", err)
-	}
-	return res.RowsAffected()
+	var rowsAffected int64
+	err := s.writeMu.WithLock(func() error {
+		res, err := s.db.ExecContext(ctx, queries["delete_expired"], cutoff.UnixMilli())
+		if err != nil {
+			return fmt.Errorf("eventstore: delete expired: %w", err)
+		}
+		rowsAffected, _ = res.RowsAffected()
+		return nil
+	})
+	return rowsAffected, err
 }
 
 func (s *SQLiteStore) Close() error {
@@ -500,11 +539,16 @@ func (s *SQLiteStore) LatestGeneration(ctx context.Context, sessionID string) (i
 func (s *SQLiteStore) DeleteExpiredTurns(ctx context.Context, cutoff time.Time) (int64, error) {
 	ctx, cancel := withDefaultTimeout(ctx)
 	defer cancel()
-	res, err := s.db.ExecContext(ctx, queries["turns.delete_expired"], cutoff.UnixMilli())
-	if err != nil {
-		return 0, fmt.Errorf("eventstore: delete expired turns: %w", err)
-	}
-	return res.RowsAffected()
+	var rowsAffected int64
+	err := s.writeMu.WithLock(func() error {
+		res, err := s.db.ExecContext(ctx, queries["turns.delete_expired"], cutoff.UnixMilli())
+		if err != nil {
+			return fmt.Errorf("eventstore: delete expired turns: %w", err)
+		}
+		rowsAffected, _ = res.RowsAffected()
+		return nil
+	})
+	return rowsAffected, err
 }
 
 func scanEvents(rows *sql.Rows) ([]*StoredEvent, error) {

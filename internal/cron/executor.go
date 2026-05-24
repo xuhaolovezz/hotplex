@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"maps"
 	"time"
 
 	"github.com/hrygo/hotplex/internal/session"
@@ -49,9 +50,7 @@ func (e *Executor) Execute(ctx context.Context, job *CronJob, timeout time.Durat
 	// Merge platform context so the bridge can inject environment variables (like channel_id).
 	platformKey := make(map[string]string)
 	if job.PlatformKey != nil {
-		for k, v := range job.PlatformKey {
-			platformKey[k] = v
-		}
+		maps.Copy(platformKey, job.PlatformKey)
 	}
 	platformKey["cron_job_id"] = job.ID
 	title := fmt.Sprintf("cron:%s", job.Name)
@@ -137,14 +136,11 @@ func (e *Executor) waitForCompletion(ctx context.Context, sessionID string, time
 // HasCLIDelivery returns true if the job has sufficient platform info
 // for CLI-based result delivery.
 func HasCLIDelivery(job *CronJob) bool {
-	switch job.Platform {
-	case "slack":
-		return job.PlatformKey["channel_id"] != ""
-	case "feishu":
-		return job.PlatformKey["chat_id"] != ""
-	default:
+	key, ok := RequiredPlatformKey[job.Platform]
+	if !ok {
 		return false
 	}
+	return job.PlatformKey[key] != ""
 }
 
 // buildDeliverySuffix appends CLI delivery instructions to the cron prompt.
@@ -166,7 +162,7 @@ func buildDeliverySuffix(job *CronJob) string {
 }
 
 func buildSlackDelivery(job *CronJob) string {
-	ch := job.PlatformKey["channel_id"]
+	ch := job.PlatformKey[RequiredPlatformKey["slack"]]
 	if ch == "" {
 		return ""
 	}
@@ -178,11 +174,16 @@ func buildSlackDelivery(job *CronJob) string {
 }
 
 func buildFeishuDelivery(job *CronJob) string {
-	chatID := job.PlatformKey["chat_id"]
+	chatID := job.PlatformKey[RequiredPlatformKey["feishu"]]
 	if chatID == "" {
 		return ""
 	}
-	cmd := fmt.Sprintf("lark-cli im +messages-send --as bot --chat-id %s --markdown \"结果内容\"", chatID)
+	var cmd string
+	if msgID := job.PlatformKey["message_id"]; msgID != "" {
+		cmd = fmt.Sprintf("lark-cli im +messages-reply --as bot --message-id %s --markdown \"结果内容\"", msgID)
+	} else {
+		cmd = fmt.Sprintf("lark-cli im +messages-send --as bot --chat-id %s --markdown \"结果内容\"", chatID)
+	}
 	return fmt.Sprintf(deliveryBlockFmt, job.Name, cmd)
 }
 

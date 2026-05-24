@@ -7,6 +7,8 @@ import (
 	"log/slog"
 	"strings"
 	"time"
+
+	"github.com/hrygo/hotplex/internal/sqlutil"
 )
 
 // ChatAccessType classifies why the chat-entered event fired.
@@ -32,33 +34,39 @@ type ChatAccessRecord struct {
 
 // ChatAccessStore provides dedup + cooldown + persistence for chat-entered events.
 type ChatAccessStore struct {
-	db  *sql.DB
-	log *slog.Logger
+	db      *sql.DB
+	log     *slog.Logger
+	writeMu *sqlutil.WriteMu
 }
 
 // NewChatAccessStore creates a store backed by the shared SQLite connection.
-func NewChatAccessStore(db *sql.DB, log *slog.Logger) *ChatAccessStore {
-	return &ChatAccessStore{db: db, log: log}
+func NewChatAccessStore(db *sql.DB, log *slog.Logger, writeMu *sqlutil.WriteMu) *ChatAccessStore {
+	return &ChatAccessStore{db: db, log: log, writeMu: writeMu}
 }
 
 // Record inserts the event. Returns false (with nil error) when event_id
 // already exists (duplicate event from the platform).
-func (s *ChatAccessStore) Record(ctx context.Context, r ChatAccessRecord) (inserted bool, err error) {
+func (s *ChatAccessStore) Record(ctx context.Context, r ChatAccessRecord) (bool, error) {
 	now := time.Now().Unix()
 	r.CreatedAt = now
-	_, err = s.db.ExecContext(ctx,
-		`INSERT INTO chat_access_events (event_id, platform, chat_id, user_id, bot_id, last_message_at, welcome_sent, created_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		r.EventID, r.Platform, r.ChatID, r.UserID, r.BotID, r.LastMessageAt, boolToInt(r.WelcomeSent), r.CreatedAt,
-	)
-	if err != nil {
-		// UNIQUE constraint violation → duplicate event.
-		if isSQLiteUnique(err) {
-			return false, nil
+	var inserted bool
+	err := s.writeMu.WithLock(func() error {
+		res, err := s.db.ExecContext(ctx,
+			`INSERT INTO chat_access_events (event_id, platform, chat_id, user_id, bot_id, last_message_at, welcome_sent, created_at)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+			r.EventID, r.Platform, r.ChatID, r.UserID, r.BotID, r.LastMessageAt, boolToInt(r.WelcomeSent), r.CreatedAt,
+		)
+		if err != nil {
+			if isSQLiteUnique(err) {
+				return nil
+			}
+			return fmt.Errorf("chat_access insert: %w", err)
 		}
-		return false, fmt.Errorf("chat_access insert: %w", err)
-	}
-	return true, nil
+		n, _ := res.RowsAffected()
+		inserted = n > 0
+		return nil
+	})
+	return inserted, err
 }
 
 // Classify determines whether a welcome should be sent.
