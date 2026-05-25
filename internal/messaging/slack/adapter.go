@@ -3,6 +3,7 @@ package slack
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -33,6 +34,14 @@ const (
 	mediaTTL         = 24 * time.Hour
 	maxMessageLength = 3800            // Slack limit is ~4000
 	errPrefix        = "\u26a0\ufe0f " // ⚠️
+	// handlerMsgTimeout controls the context timeout for HandleTextMessage.
+	// Covers Bridge.Handle → session start → HTTP request (createSession, initSessionConn).
+	// Does NOT cover acquireServer's process fork (proc.Start is not context-aware).
+	// Set longer than cmd timeout because LLM agentic turns (multi-tool) can take minutes.
+	handlerMsgTimeout = 300 * time.Second
+	// handlerCmdTimeout controls the context timeout for CmdControl/CmdWorker paths.
+	// These are lightweight control-plane operations that should complete quickly.
+	handlerCmdTimeout = 60 * time.Second
 )
 
 // Subtypes that should never be processed.
@@ -471,22 +480,24 @@ func (a *Adapter) handleMessageEvent(ctx context.Context, msgEvent *slackevents.
 	case messaging.CmdControl:
 		conn := a.GetOrCreateConn(channelID, threadTS)
 		if conn != nil {
-			conn.handlerMu.Lock()
-			defer conn.handlerMu.Unlock()
+			defer conn.lockHandlerMu()()
 		}
-		a.handleTextControlCommand(ctx, teamID, channelID, threadTS, userID, cmd.Control)
+		cmdCtx, cmdCancel := context.WithTimeout(ctx, handlerCmdTimeout)
+		defer cmdCancel()
+		a.handleTextControlCommand(cmdCtx, teamID, channelID, threadTS, userID, cmd.Control)
 		return
 	case messaging.CmdWorker:
 		conn := a.GetOrCreateConn(channelID, threadTS)
 		if conn != nil {
 			conn.messageTS = msgEvent.TimeStamp
-			conn.handlerMu.Lock()
-			defer conn.handlerMu.Unlock()
+			defer conn.lockHandlerMu()()
 		}
 		if a.isAssistantCapable.Load() && threadTS != "" {
 			_ = a.SetAssistantStatus(ctx, channelID, threadTS, "Processing "+cmd.Worker.Label+"...")
 		}
-		a.handleTextWorkerCommand(ctx, teamID, channelID, threadTS, userID, cmd.Worker)
+		cmdCtx, cmdCancel := context.WithTimeout(ctx, handlerCmdTimeout)
+		defer cmdCancel()
+		a.handleTextWorkerCommand(cmdCtx, teamID, channelID, threadTS, userID, cmd.Worker)
 		return
 	}
 
@@ -508,6 +519,10 @@ func (a *Adapter) handleMessageEvent(ctx context.Context, msgEvent *slackevents.
 
 	if err := a.HandleTextMessage(ctx, platformMsgID, channelID, teamID, threadTS, userID, text); err != nil {
 		a.Log.Warn("slack: handle message failed", "err", err, "channel", channelID, "thread", threadTS, "user", userID)
+		if errors.Is(err, context.DeadlineExceeded) {
+			a.sendEphemeralOrPost(ctx, channelID, threadTS, userID,
+				"⚠️ Request timed out. The operation took too long and was cancelled. Please try again.")
+		}
 	}
 }
 
@@ -534,9 +549,10 @@ func (a *Adapter) HandleTextMessage(ctx context.Context, platformMsgID, channelI
 		return fmt.Errorf("slack: failed to build envelope")
 	}
 
-	conn.handlerMu.Lock()
-	defer conn.handlerMu.Unlock()
-	return a.Bridge().Handle(ctx, envelope, conn)
+	defer conn.lockHandlerMu()()
+	msgCtx, cancel := context.WithTimeout(ctx, handlerMsgTimeout)
+	defer cancel()
+	return a.Bridge().Handle(msgCtx, envelope, conn)
 }
 
 // NewStreamingWriter creates a streaming writer for the given channel/thread.
@@ -660,6 +676,11 @@ func (a *Adapter) handleTextControlCommand(ctx context.Context, teamID, channelI
 
 	if err := a.Bridge().Handle(ctx, ctrlEnv, conn); err != nil {
 		a.Log.Warn("slack: text control command failed", "action", result.Label, "err", err)
+		if errors.Is(err, context.DeadlineExceeded) {
+			a.sendEphemeralOrPost(ctx, channelID, threadTS, userID,
+				fmt.Sprintf("⚠️ %s timed out. Please try again.", result.Label))
+			return
+		}
 		// Provide user-friendly error message with details
 		errMsg := fmt.Sprintf("❌ Failed to execute %s: %s", result.Label, formatSecurityErrorSlack(err))
 		a.sendEphemeralOrPost(ctx, channelID, threadTS, userID, errMsg)
@@ -711,6 +732,11 @@ func (a *Adapter) handleTextWorkerCommand(ctx context.Context, teamID, channelID
 
 	if err := a.Bridge().Handle(ctx, cmdEnv, conn); err != nil {
 		a.Log.Warn("slack: worker command failed", "command", result.Label, "err", err)
+		if errors.Is(err, context.DeadlineExceeded) {
+			a.sendEphemeralOrPost(ctx, channelID, threadTS, userID,
+				fmt.Sprintf("⚠️ %s timed out. Please try again.", result.Label))
+			return
+		}
 		a.sendEphemeralOrPost(ctx, channelID, threadTS, userID, fmt.Sprintf("❌ Failed to execute %s.", result.Label))
 		return
 	}
@@ -743,6 +769,19 @@ type SlackConn struct {
 // NewSlackConn creates a platform connection bound to a channel/thread.
 func NewSlackConn(adapter *Adapter, channelID, threadTS, workDir string) *SlackConn {
 	return &SlackConn{adapter: adapter, channelID: channelID, threadTS: threadTS, workDir: workDir}
+}
+
+// lockHandlerMu acquires the per-thread serialization lock.
+// Returns an unlock function for use with defer.
+//
+// Known limitation: Lock() blocks without timeout if another goroutine holds
+// handlerMu. The timeout on the holder side ensures eventual release. A future
+// improvement could use TryLock + retry. Callers should use:
+//
+//	defer conn.lockHandlerMu()()
+func (c *SlackConn) lockHandlerMu() (unlock func()) {
+	c.handlerMu.Lock()
+	return c.handlerMu.Unlock
 }
 
 func (c *SlackConn) WorkDir() string {
