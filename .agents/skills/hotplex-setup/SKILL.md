@@ -290,7 +290,7 @@ hotplex service logs -f          # 日志确认连接
 | 版本 | vX.Y.Z |
 | 消息平台 | Slack: xoxb-... (N bots) / 飞书: cli_xxx (N bots) |
 | 访问策略 | allowlist |
-| Worker | claude_code |
+| Worker | Claude Code |
 | STT | local / feishu+local |
 | TTS | enabled / disabled |
 | 服务模式 | systemd/launchd/SCM/dev |

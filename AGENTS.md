@@ -61,19 +61,19 @@
 
 ### 入口点 (`cmd/hotplex/`)
 
-| 文件                                       | 功能                                                           |
-| ------------------------------------------ | -------------------------------------------------------------- |
-| `main.go`                                  | CLI Root (cobra 根命令)                                        |
-| `gateway_run.go`                           | GatewayDeps (DI 容器、信号处理、hub/session/bridge 初始化)     |
-| `gateway_cmd.go`                           | gateway 子命令：start/stop/restart + `--detached`              |
-| `gateway_restart_helper.go`                | Restart Helper（独立 PGID，Worker-initiated restart）          |
-| `gateway_restart_helper_{unix,windows}.go` | 平台隔离（Setpgid / CREATE_NEW_PROCESS_GROUP）                 |
-| `routes.go`                                | HTTP 路由注册                                                  |
+| 文件                                       | 功能                                                                   |
+| ------------------------------------------ | ---------------------------------------------------------------------- |
+| `main.go`                                  | CLI Root (cobra 根命令)                                                |
+| `gateway_run.go`                           | GatewayDeps (DI 容器、信号处理、hub/session/bridge 初始化)             |
+| `gateway_cmd.go`                           | gateway 子命令：start/stop/restart + `--detached`                      |
+| `gateway_restart_helper.go`                | Restart Helper（独立 PGID，Worker-initiated restart）                  |
+| `gateway_restart_helper_{unix,windows}.go` | 平台隔离（Setpgid / CREATE_NEW_PROCESS_GROUP）                         |
+| `routes.go`                                | HTTP 路由注册                                                          |
 | `messaging_init.go`                        | 消息适配器生命周期（多 bot 初始化 + fillSlackExtras/fillFeishuExtras） |
-| `cron_cmd.go`                              | cron 子命令注册                                                |
-| `cron_*`                                   | cron CRUD CLI（create/update/delete/get/list/trigger/history） |
-| `service_*.go`                             | 系统服务管理（systemd/launchd/SCM）                            |
-| `update.go`                                | 自更新命令：GitHub API、下载、校验、替换                       |
+| `cron_cmd.go`                              | cron 子命令注册                                                        |
+| `cron_*`                                   | cron CRUD CLI（create/update/delete/get/list/trigger/history）         |
+| `service_*.go`                             | 系统服务管理（systemd/launchd/SCM）                                    |
+| `update.go`                                | 自更新命令：GitHub API、下载、校验、替换                               |
 
 ### 核心模块 (`internal/`)
 
@@ -118,6 +118,7 @@
 
 **Worker**：
 - `claudecode/` - Claude Code 适配器 (stdio, `--print --session-id`)
+- `codexcli/` - Codex CLI 适配器 (exec + app-server 双模式)
 - `opencodeserver/` - Open Code Server 适配器（单例进程, HTTP+SSE）
 - `proc/` - 跨平台进程生命周期管理 (PGID/Job Object)
 - `base/` - 共享 BaseWorker + Conn + MetadataHandler
@@ -179,16 +180,16 @@ configs/   - 配置文件
 
 ### 修改已有组件
 
-| 组件            | 文件                             | 说明                                              |
-| --------------- | -------------------------------- | ------------------------------------------------- |
-| Agent 配置      | `internal/agentconfig/loader.go` | 文件加载、大小限制                                |
-| Session 管理    | `internal/session/manager.go`    | 状态机、原子操作                                  |
-| WebSocket 协议  | `internal/gateway/conn.go`       | ReadPump/WritePump                                |
-| LLM 重试        | `internal/gateway/llm_retry.go`  | 可重试错误检测                                    |
-| Worker 启动命令 | `configs/config.yaml`            | `claude_code.command` / `opencode_server.command` |
-| 路由注册        | `cmd/hotplex/routes.go`          | HTTP 路由                                         |
+| 组件            | 文件                             | 说明                                                       |
+| --------------- | -------------------------------- | ---------------------------------------------------------- |
+| Agent 配置      | `internal/agentconfig/loader.go` | 文件加载、大小限制                                         |
+| Session 管理    | `internal/session/manager.go`    | 状态机、原子操作                                           |
+| WebSocket 协议  | `internal/gateway/conn.go`       | ReadPump/WritePump                                         |
+| LLM 重试        | `internal/gateway/llm_retry.go`  | 可重试错误检测                                             |
+| Worker 启动命令 | `configs/config.yaml`            | `claude_code.command` / `opencode_server.command`          |
+| 路由注册        | `cmd/hotplex/routes.go`          | HTTP 路由                                                  |
 | 多 bot 配置     | `internal/config/config.go`      | `SlackBotConfig`/`FeishuBotConfig`、normalize、propagation |
-| Bot 状态 API    | `internal/admin/bot_handlers.go` | `BotListerProvider` + HTTP handlers               |
+| Bot 状态 API    | `internal/admin/bot_handlers.go` | `BotListerProvider` + HTTP handlers                        |
 
 ### 跨平台兼容
 
@@ -353,7 +354,7 @@ hotplex cron history <id|name> [--json]
 ### 符号链接
 
 - `CLAUDE.md` ← `AGENTS.md`（只编辑 AGENTS.md）
-- `.claude` ← `.agent`
+- `.claude` ← `.agents`
 
 ### 重要限制
 

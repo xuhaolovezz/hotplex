@@ -190,8 +190,13 @@ func (w *Worker) SupportsStreaming() bool { return true }
 func (w *Worker) SupportsTools() bool     { return true }
 func (w *Worker) EnvBlocklist() []string  { return openCodeSrvEnvBlocklist }
 func (w *Worker) SessionStoreDir() string { return "" }
-func (w *Worker) MaxTurns() int           { return 0 }
-func (w *Worker) Modalities() []string    { return []string{"text", "code", "image"} }
+
+// MaxTurns returns 0 (unlimited).
+// B3-1 note: OCS does not support dynamic per-session steps limits.
+// The underlying OpenCode agent may have a predefined steps config,
+// but it cannot be set via the HTTP session API.
+func (w *Worker) MaxTurns() int        { return 0 }
+func (w *Worker) Modalities() []string { return []string{"text", "code", "image"} }
 
 // ─── Worker Lifecycle ─────────────────────────────────────────────────────────
 
@@ -476,7 +481,26 @@ func (w *Worker) Clear(ctx context.Context) error {
 	if w.cmd == nil {
 		return fmt.Errorf("opencode server: commander not initialized")
 	}
-	return w.cmd.Clear(ctx)
+	oldID := w.cmd.SessionID()
+	if err := w.cmd.Clear(ctx); err != nil {
+		return err
+	}
+	newID := w.cmd.SessionID()
+	if newID == oldID || newID == "" {
+		return nil
+	}
+	// Cancel old SSE goroutine and unsubscribe from old session.
+	w.Mu.Lock()
+	if w.sseCancel != nil {
+		w.sseCancel()
+	}
+	w.Mu.Unlock()
+	w.singleton.Unsubscribe(oldID)
+	// Propagate new session ID to conn + atomic store.
+	w.SetWorkerSessionID(newID)
+	// Re-subscribe EventBus for the new session.
+	w.startSSE(newID)
+	return nil
 }
 
 func (w *Worker) Rewind(ctx context.Context, targetID string) error {
@@ -503,9 +527,18 @@ func (w *Worker) applyPermissions(ctx context.Context, session worker.SessionInf
 		mode = session.PermissionMode
 	}
 
-	_, err := cmd.SendControlRequest(ctx, "set_permission_mode", map[string]any{
+	body := map[string]any{
 		"mode": mode,
-	})
+	}
+
+	// B3-2 绕行: pass AllowedTools so setPermissionMode can generate
+	// per-tool allow rules. Semantics differ from CC --allowed-tools:
+	// OCS permission rules are session-scoped and pattern-based.
+	if len(session.AllowedTools) > 0 {
+		body["allowed_tools"] = session.AllowedTools
+	}
+
+	_, err := cmd.SendControlRequest(ctx, "set_permission_mode", body)
 	return err
 }
 

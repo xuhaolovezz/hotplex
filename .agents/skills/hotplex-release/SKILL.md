@@ -212,7 +212,7 @@ CommandMenu），Gateway Core 获得了连接稳定性修复（CAS race guard、
 
 ### Fixed
 
-- **Gateway Core**: ClaudeCode mapper silently discarded `EventSystem` and `EventSessionState` — payload type mismatch caused all state transitions to be dropped.
+- **Gateway Core**: Claude Code mapper silently discarded `EventSystem` and `EventSessionState` — payload type mismatch caused all state transitions to be dropped.
 - **WebChat UI**: Connection stability — deterministic session IDs across REST/WS paths, browser console warnings eliminated.
 ```
 
@@ -252,7 +252,7 @@ CommandMenu），Gateway Core 获得了连接稳定性修复（CAS race guard、
 | `AGENTS.md` | 头部 `**最后更新**: YYYY-MM-DD` | `**最后更新**: 2026-05-10` |
 | `AGENTS.md` | 头部 `**版本**: vX.X.X` | `**版本**: v1.2.0` |
 
-> **注意**：`AGENTS.md` 是 `CLAUDE.md` 的符号链接，只需编辑 `AGENTS.md`（这是实际文件），`CLAUDE.md` 会自动同步。修改时请同时更新**版本号**和**最后更新日期**。
+> **注意**：`CLAUDE.md` 是 `AGENTS.md` 的符号链接，只需编辑 `AGENTS.md`（这是实际文件），`CLAUDE.md` 会自动同步。修改时请同时更新**版本号**和**最后更新日期**。
 
 ### 4.4 基础设施
 

@@ -26,6 +26,7 @@ import (
 
 // Compile-time interface compliance checks.
 var _ worker.Worker = (*Worker)(nil)
+var _ worker.WorkerCommander = (*Worker)(nil)
 
 // commandParts stores the space-split command (binary + optional prefix args).
 // Thread-safe via atomic.Value. Default: ["claude"].
@@ -392,12 +393,18 @@ func (w *Worker) Input(ctx context.Context, content string, metadata map[string]
 		return nil
 	}
 
-	// Normal input: use SendUserMessage for Claude Code's stream-json format
+	// Normal input: use Claude Code's stream-json format
 	// instead of AEP envelope format
 	if baseConn, ok := conn.(*base.Conn); ok {
-		if err := baseConn.SendUserMessage(ctx, content); err != nil {
+		stdin, mu := baseConn.StdinLocked()
+		defer mu.Unlock()
+		if stdin == nil {
+			return &worker.WorkerError{Kind: worker.ErrKindUnavailable, Message: "claudecode: stdin closed"}
+		}
+		if err := writeStreamInputLocked(stdin, content); err != nil {
 			return fmt.Errorf("claudecode: input: %w", err)
 		}
+		baseConn.SetLastInputLocked(content)
 	} else {
 		// Fallback to AEP envelope for tests with mock connections
 		msg := events.NewEnvelope(
@@ -816,6 +823,82 @@ func (w *Worker) readOutput(ctx context.Context) {
 			}
 		}
 	}
+}
+
+// ─── WorkerCommander ──────────────────────────────────────────────────────────
+
+// Compact sends the /compact text command to Claude Code.
+// B3-3: uses writeStreamInput directly (bypasses LastInput) since /compact
+// is a control command, not user content that should be re-delivered on crash.
+// Note: args is ignored. Claude Code's /compact does not accept extra parameters
+// (unlike OCS which supports model selection in the summarize request).
+func (w *Worker) Compact(ctx context.Context, _ map[string]any) error {
+	conn := w.Conn()
+	if conn == nil {
+		return &worker.WorkerError{Kind: worker.ErrKindUnavailable, Message: "claudecode: not started"}
+	}
+	w.Mu.Lock()
+	if w.Proc == nil || !w.Proc.IsRunning() {
+		w.Mu.Unlock()
+		return &worker.WorkerError{Kind: worker.ErrKindUnavailable, Message: "claudecode: worker process is not running"}
+	}
+	w.Mu.Unlock()
+
+	baseConn, ok := conn.(*base.Conn)
+	if !ok {
+		return worker.ErrNotImplemented
+	}
+	stdin, mu := baseConn.StdinLocked()
+	if stdin == nil {
+		mu.Unlock()
+		return &worker.WorkerError{Kind: worker.ErrKindUnavailable, Message: "claudecode: stdin closed"}
+	}
+	defer mu.Unlock()
+
+	// writeStreamInputLocked issues syscall.Write which blocks when the pipe
+	// buffer is full and the reader has stalled. Guard with context cancellation
+	// so the caller is not blocked indefinitely.
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- writeStreamInputLocked(stdin, "/compact")
+	}()
+	select {
+	case err := <-errCh:
+		return err
+	case <-ctx.Done():
+		// Wait for the write goroutine to finish so we don't release mu while
+		// a write is in flight. However, syscall.Write blocks at the OS level
+		// and cannot be preempted — if the pipe buffer is full and the worker
+		// process is stalled, this blocks forever. Use a secondary timeout to
+		// bound the wait. The orphaned goroutine will complete when the process
+		// exits and the pipe read end closes (EPIPE).
+		select {
+		case <-errCh:
+		case <-time.After(30 * time.Second):
+			w.Log.Warn("claudecode: compact: write goroutine did not complete within 30s after ctx cancellation, releasing lock")
+		}
+		return fmt.Errorf("claudecode: compact: %w", ctx.Err())
+	}
+}
+
+// Clear is not supported by Claude Code in non-interactive mode.
+func (w *Worker) Clear(_ context.Context) error {
+	return worker.ErrNotImplemented
+}
+
+// Rewind sends a rewind_files control_request to Claude Code.
+// B3-4: uses rewind_files control_request subtype instead of /rewind text command.
+// When targetID is empty, the Claude CLI will rewind to the most recent assistant turn.
+func (w *Worker) Rewind(ctx context.Context, targetID string) error {
+	body := map[string]any{}
+	if targetID != "" {
+		body["target_id"] = targetID
+	}
+	_, err := w.SendControlRequest(ctx, "rewind_files", body)
+	if err != nil {
+		return fmt.Errorf("claudecode: rewind: %w", err)
+	}
+	return nil
 }
 
 // trySend non-blocking sends an envelope to the connection.

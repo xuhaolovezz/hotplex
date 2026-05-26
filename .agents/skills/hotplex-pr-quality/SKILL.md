@@ -121,8 +121,8 @@ PR 描述模板：
 当用户请求审查时：
 
 1. 检查 PR 状态（OPEN、非 draft）
-2. 获取 PR diff + CLAUDE.md
-3. 启动并行审查：CLAUDE.md 合规、bug 扫描（读实际源码验证）、git 历史上下文、历史 PR 评论
+2. 获取 PR diff + AGENTS.md
+3. 启动并行审查：AGENTS.md 合规、bug 扫描（读实际源码验证）、git 历史上下文、历史 PR 评论
 4. 汇总去重，每个 issue 独立评分（0-100），≥80 阈值
 5. 发布审查评论或报告无问题
 

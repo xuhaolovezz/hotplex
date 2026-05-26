@@ -42,6 +42,7 @@
 ### 📱 Multi-Platform Delivery & Integration
 - 📱 **Cross-Platform Delivery** — **"Write Once, Deploy Anywhere"**. Bridge agents to Web, Slack (Socket Mode), and Feishu (WebSocket) with zero code changes.
 - 💬 **Embedded Web Chat** — A single binary serves both the API/WebSocket gateway and a premium Next.js-based web chat interface out of the box.
+- 🖥️ **Admin WebUI** — Built-in management dashboard for API keys, user management, bot (agent) configuration, and session monitoring.
 - 🌍 **Multi-language SDKs** — Go, TypeScript, Python, Java clients ready to use
 
 ### ⚙️ Developer Experience & Operations
@@ -137,23 +138,23 @@ Supports **systemd** (Linux), **launchd** (macOS), and **Windows SCM**.
 HotPlex sits between frontend clients and backend AI coding agents, featuring a built-in **Meta-Cognition Core** that abstracts protocol differences into a unified **AEP v1** WebSocket layer.
 
 ```
-┌──────────┐   ┌──────────┐   ┌──────────┐
-│  Web UI  │   │  Slack   │   │  Feishu  │
-└────┬─────┘   └────┬─────┘   └────┬─────┘
-     │              │              │
-     └──────────────┼──────────────┘
-                    │
-              ┌─────┴─────┐
-              │  HotPlex  │
-              │  Gateway  │
-              └─────┬─────┘
-                    │
-         ┌──────────┴──────────┐
-         │                     │
-   ┌─────┴─────┐          ┌────┴──────┐
-   │  Claude   │          │  OpenCode │
-   │  Code     │          │  Server   │
-   └───────────┘          └───────────┘
+┌────────────┐   ┌────────────┐   ┌────────────┐
+│   Web UI   │   │   Slack    │   │   Feishu   │
+└─────┬──────┘   └─────┬──────┘   └─────┬──────┘
+      │                │                │
+      └────────────────┼────────────────┘
+                       │
+                 ┌─────┴──────┐
+                 │  HotPlex   │
+                 │  Gateway   │
+                 └─────┬──────┘
+                       │
+      ┌────────────────┼────────────────┐
+      │                │                │
+┌─────┴──────┐   ┌─────┴──────┐   ┌─────┴──────┐
+│   Claude   │   │   Codex    │   │  OpenCode  │
+│    Code    │   │    CLI     │   │   Server   │
+└────────────┘   └────────────┘   └────────────┘
 ```
 
 ## 🔗 SDKs & Libraries
