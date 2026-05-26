@@ -1,5 +1,31 @@
 # Changelog
 
+## [1.18.1] - 2026-05-26
+
+### Summary
+
+v1.18.1 是一次 patch 版本更新，聚焦于 **数据库并发稳定性** 和 **Worker 协议层重构**。引入全局 WriteMu 消除 SQLite 并发写入的 SQLITE_BUSY 错误，重构 Claude Code 协议类型到独立包并实现 OCS WorkerCommander（权限控制、Compact 死锁修复）。同时修复了多步 agentic turn 的 token 统计膨胀、Cron job 永久跳过、Slack 消息处理永久阻塞等稳定性问题。
+
+### Changed
+
+- **Worker**: Move Claude Code protocol types from `base` to `claudecode` package, resolving SOLID/DIP violation. Implement `WorkerCommander` for OCS with `allowed_tools` permission enforcement. (#484)
+- **Worker**: Harden `Compact` with context guard and 30s secondary timeout, deprecate unprotected `Stdin()` in favor of `StdinLocked()`. (#484)
+- **Worker**: Fix OCS `Clear` to propagate new session ID to SSE subscription, add `sync.Mutex` to `ServerCommander` preventing data race. (#484)
+- **Gateway Core**: Introduce global `WriteMu` across all SQLite stores to serialize writes and eliminate SQLITE_BUSY errors under concurrent load. (#479)
+- **Gateway Core**: Extract `WriteMu.WithLock()` DRY helper consolidating 16 nil-check-lock-unlock call sites. (#479)
+- **Session**: Add `source` column for differentiated cleanup — cron sessions 24h, normal sessions 7d, with configurable retention. (#477)
+- **Session**: `ContextFill` now reads only from `get_context_usage` control channel, eliminating 2-3x token inflation in multi-step agentic turns. (#477)
+- **Cron**: Validate `platform` matches `PlatformKey` fields (feishu requires `chat_id`, slack requires `channel_id`). (#479)
+
+### Fixed
+
+- **Cron**: `finishExecution` now syncs `RunningAtMs=0` to in-memory state, preventing permanently skipped jobs after timeout or failure. (#488)
+- **Worker**: `turns` table `created_at=0` caused by missing `Timestamp`/`Version` in mapper — switched to `events.NewEnvelope()`. (#485)
+- **Worker**: OCS `handleStepStarted` ignoring `model` field, causing empty `model_usage` in turn stats. (#485)
+- **Messaging/Slack**: `handlerMu` could be held indefinitely when OCS worker start hangs — added 120s context timeout with user feedback. (#481)
+- **Gateway Core**: EventStore `Collector` flush/close ordering and double-release safety net. (#479)
+- **Gateway Core**: PID file accumulation on worker crash path — `proc/manager.Wait()` now calls `untrackPID`. (#479)
+
 ## [1.18.0] - 2026-05-22
 
 ### Summary
