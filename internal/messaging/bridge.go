@@ -19,7 +19,6 @@ type Bridge struct {
 	log        *slog.Logger
 	platform   PlatformType
 	hub        HubInterface
-	sm         SessionManager
 	handler    HandlerInterface
 	starter    SessionStarter
 	workerType string
@@ -29,13 +28,12 @@ type Bridge struct {
 
 // NewBridge creates a new platform bridge.
 func NewBridge(log *slog.Logger, platform PlatformType, hub HubInterface,
-	sm SessionManager, handler HandlerInterface, starter SessionStarter, workerType, workDir string,
+	handler HandlerInterface, starter SessionStarter, workerType, workDir string,
 ) *Bridge {
 	return &Bridge{
 		log:        log.With("component", "messaging_bridge", "platform", string(platform)),
 		platform:   platform,
 		hub:        hub,
-		sm:         sm,
 		handler:    handler,
 		starter:    starter,
 		workerType: workerType,
@@ -149,39 +147,6 @@ func (b *Bridge) MakeEnvelope(userID, text string, pctx session.PlatformContext)
 		md["user_id"] = pctx.UserID
 	}
 	return b.makeEnvelope(sessionID, userID, text, md)
-}
-
-// MakeSlackEnvelope converts a Slack message to an AEP input envelope.
-// workDir overrides the bridge's default workDir for session key derivation; empty falls back to b.workDir.
-func (b *Bridge) MakeSlackEnvelope(teamID, channelID, threadTS, userID, text, workDir, botID string) *events.Envelope {
-	if workDir == "" {
-		workDir = b.workDir
-	}
-	return b.MakeEnvelope(userID, text, session.PlatformContext{
-		Platform:  string(PlatformSlack),
-		BotID:     botID,
-		TeamID:    teamID,
-		ChannelID: channelID,
-		ThreadTS:  threadTS,
-		UserID:    userID,
-		WorkDir:   workDir,
-	})
-}
-
-// MakeFeishuEnvelope converts a Feishu message to an AEP input envelope.
-// workDir overrides the bridge's default workDir for session key derivation; empty falls back to b.workDir.
-func (b *Bridge) MakeFeishuEnvelope(chatID, threadTS, userID, text, workDir, botID string) *events.Envelope {
-	if workDir == "" {
-		workDir = b.workDir
-	}
-	return b.MakeEnvelope(userID, text, session.PlatformContext{
-		Platform: string(PlatformFeishu),
-		BotID:    botID,
-		ChatID:   chatID,
-		ThreadTS: threadTS,
-		UserID:   userID,
-		WorkDir:  workDir,
-	})
 }
 
 // extractPlatformKey extracts the consistency-mapping inputs from the envelope metadata.
