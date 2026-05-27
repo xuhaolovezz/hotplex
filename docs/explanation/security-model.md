@@ -81,7 +81,7 @@ Browser ──init envelope──> Conn.ReadPump
 
 #### Dev 模式
 
-当未配置任何 API Key 时，所有请求以 `"anonymous"` 身份放行，无需认证。这一行为在 `AuthenticateRequest` 和 `AuthenticateKey` 中均有处理：`len(validKey) == 0` 时直接返回 `"anonymous"`。
+当未配置任何 API Key 时，所有请求以 `"anonymous"` 身份放行，无需认证。判定条件为配置源和数据库源均无 Key，且 Dev 模式未被锁定（`devModeLocked`）。一旦系统中曾存在过任何 Key（配置文件或 Admin API 创建），`devModeLocked` 即被置为 `true`，此后即使删除所有 Key 也无法重新进入 Dev 模式，防止认证绕过窗口。
 
 #### API Key 到用户身份的映射
 

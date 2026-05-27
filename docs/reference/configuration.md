@@ -142,19 +142,48 @@ Admin API 管理端点配置。
 
 ### 3.3 db — 数据持久化
 
-SQLite 数据库配置，Session 和 Event Store 共享。
+数据库配置，支持 SQLite（默认）和 PostgreSQL 两种后端。Session、Event Store、Cron 等模块共享同一数据库实例。
 
 | 字段 | 类型 | 默认值 | 环境变量 | 说明 |
 |------|------|--------|----------|------|
-| `path` | string | `~/.hotplex/data/hotplex.db` | `HOTPLEX_DB_PATH` | 主数据库文件路径。Session 和 Event 共用 |
-| `events_path` | string | `""` | — | **已废弃**：Event 表已迁移至主数据库，此字段不再使用 |
-| `wal_mode` | bool | `true` | `HOTPLEX_DB_WAL_MODE` | 启用 WAL (Write-Ahead Logging) 模式。生产环境必须开启 |
-| `busy_timeout` | duration | `5s` | — | SQLite 忙等待超时。写入冲突时的重试时间 |
-| `max_open_conns` | int | `3` | — | 最大打开连接数。1 写 + 2 读，适用于共享 Session/Event Store |
-| `vacuum_threshold` | float64 | `0.2` | — | VACUUM 触发阈值。当空闲页占比 ≥ 20% 时自动 VACUUM |
-| `cache_size_kib` | int | `8192` (8MB) | — | SQLite 页面缓存大小（KiB） |
-| `mmap_size_mib` | int | `64` (64MB) | — | SQLite mmap 大小（MiB） |
-| `wal_autocheckpoint` | int | `2000` | — | WAL 自动 checkpoint 页数阈值 |
+| `driver` | string | `"sqlite"` | `HOTPLEX_DB_DRIVER` | 数据库驱动。可选 `"sqlite"` / `"postgres"` / `"pg"` / `"postgresql"` |
+| `sqlite` | object | — | — | SQLite 子配置（见下方）。当 driver 为 sqlite 时生效 |
+| `postgres` | object | — | — | PostgreSQL 子配置（见下方）。当 driver 为 postgres 时生效 |
+
+#### SQLite 配置 (`db.sqlite.*`)
+
+当 `db.driver` 为 `sqlite`（或未设置）时使用。下方遗留字段（`db.path` 等）仍可用于向后兼容，结构化字段优先。
+
+| 字段 | 类型 | 默认值 | 环境变量 | 说明 |
+|------|------|--------|----------|------|
+| `sqlite.path` | string | `~/.hotplex/data/hotplex.db` | `HOTPLEX_DB_PATH` | 主数据库文件路径。Session 和 Event 共用 |
+| `sqlite.wal_mode` | bool | `true` | `HOTPLEX_DB_WAL_MODE` | 启用 WAL (Write-Ahead Logging) 模式。生产环境必须开启 |
+| `sqlite.busy_timeout` | duration | `5s` | — | SQLite 忙等待超时。写入冲突时的重试时间 |
+| `sqlite.max_open_conns` | int | `3` | — | 最大打开连接数。1 写 + 2 读 |
+| `sqlite.vacuum_threshold` | float64 | `0.2` | — | VACUUM 触发阈值。当空闲页占比 ≥ 20% 时自动 VACUUM |
+| `sqlite.cache_size_kib` | int | `8192` (8MB) | — | SQLite 页面缓存大小（KiB） |
+| `sqlite.mmap_size_mib` | int | `64` (64MB) | — | SQLite mmap 大小（MiB） |
+| `sqlite.wal_autocheckpoint` | int | `2000` | — | WAL 自动 checkpoint 页数阈值 |
+
+> **遗留字段**：`db.path`、`db.wal_mode`、`db.busy_timeout`、`db.max_open_conns`、`db.vacuum_threshold`、`db.cache_size_kib`、`db.mmap_size_mib`、`db.wal_autocheckpoint` 仍可使用，等价于 `db.sqlite.*`。结构化字段优先。`db.events_path` 已废弃。
+
+#### PostgreSQL 配置 (`db.postgres.*`)
+
+当 `db.driver` 设为 `"postgres"` 时使用 PostgreSQL 替代 SQLite。适用于生产环境多实例部署和高并发场景。
+
+| 字段 | 类型 | 默认值 | 环境变量 | 说明 |
+|------|------|--------|----------|------|
+| `postgres.dsn` | string | — | `HOTPLEX_DB_POSTGRES_DSN` | PostgreSQL 连接字符串。格式：`postgres://user:password@host:port/dbname?sslmode=prefer` |
+| `postgres.max_open_conns` | int | `25` | `HOTPLEX_DB_POSTGRES_MAX_OPEN_CONNS` | 最大打开连接数 |
+
+```yaml
+# PostgreSQL 配置示例
+db:
+  driver: "postgres"
+  postgres:
+    dsn: "postgres://hotplex:secret@db.example.com:5432/hotplex?sslmode=require"
+    max_open_conns: 25
+```
 
 ---
 
