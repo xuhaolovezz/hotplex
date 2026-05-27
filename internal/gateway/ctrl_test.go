@@ -108,6 +108,7 @@ func newHandlerWithRealStore(t *testing.T) (*Handler, *session.Manager, *Hub, fu
 	cleanup := func() { os.Remove(tmpPath) }
 
 	cfg.DB.Path = tmpPath
+	cfg.DB.SQLite.Path = tmpPath
 	writeMu := sqlutil.NewWriteMu(sqlutil.DialectSQLite)
 	store, err := session.NewSQLiteStore(context.Background(), cfg, writeMu)
 	require.NoError(t, err)
