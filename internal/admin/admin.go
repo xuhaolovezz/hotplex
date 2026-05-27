@@ -12,6 +12,7 @@ import (
 
 	"github.com/hrygo/hotplex/internal/config"
 	"github.com/hrygo/hotplex/internal/eventstore"
+	"github.com/hrygo/hotplex/internal/sqlutil"
 	"github.com/hrygo/hotplex/internal/worker"
 	"github.com/hrygo/hotplex/pkg/events"
 )
@@ -26,6 +27,13 @@ const (
 	ScopeAdminRead    = "admin:read"
 	ScopeAdminWrite   = "admin:write"
 )
+
+// DBExecutor covers the sql.DB methods used by apiKeyUserStore.
+type DBExecutor interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
 
 type SessionManagerProvider interface {
 	Stats() (total, max, unique int)
@@ -97,7 +105,7 @@ type AdminAPI struct {
 	botLister     BotListerProvider
 	botConfig     BotConfigProvider
 	logCollector  LogCollector
-	akStore       *apiKeyUserStore // nil when DB resolver not enabled
+	akStore       APIKeyUserStorer // nil when DB resolver not enabled
 	rateLimiter   atomic.Value     // *simpleRateLimiter
 	allowedCIDRs  atomic.Value     // []string
 	version       func() string
@@ -121,8 +129,10 @@ type Deps struct {
 	Version       func() string
 	NewSessionID  func() string
 	Restart       func() error
-	DB            *sql.DB          // Optional: enables API key user CRUD + DB resolver
+	DB            DBExecutor       // Optional: enables API key user CRUD + DB resolver
 	DBResolver    cacheInvalidator // Optional: invalidates DBResolver cache after CUD
+	WriteMu       *sqlutil.WriteMu // Optional: serializes SQLite writes; nil-safe, PG-safe
+	APIKeyStore   APIKeyUserStorer // Optional: pre-built store (e.g. PG); overrides DB-based creation
 }
 
 func New(deps Deps) *AdminAPI {
@@ -142,11 +152,16 @@ func New(deps Deps) *AdminAPI {
 		botLister:     deps.BotLister,
 		botConfig:     deps.BotConfig,
 		logCollector:  lc,
-		akStore:       newAPIKeyUserStoreWithInvalidator(deps.DB, deps.DBResolver),
-		version:       deps.Version,
-		newSessionID:  deps.NewSessionID,
-		restart:       deps.Restart,
-		startedAt:     time.Now(),
+		akStore: func() APIKeyUserStorer {
+			if deps.APIKeyStore != nil {
+				return deps.APIKeyStore
+			}
+			return newAPIKeyUserStoreWithInvalidator(deps.DB, deps.DBResolver, deps.WriteMu)
+		}(),
+		version:      deps.Version,
+		newSessionID: deps.NewSessionID,
+		restart:      deps.Restart,
+		startedAt:    time.Now(),
 	}
 	return a
 }
