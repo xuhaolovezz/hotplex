@@ -56,7 +56,12 @@ const (
 // platform connection wrappers. It is used as the value type in the
 // sessions routing map.
 type SessionWriter interface {
+	// WriteCtx writes an envelope directly to the connection. Used for
+	// control events and init_ack where init-phase buffering must be bypassed.
 	WriteCtx(ctx context.Context, env *events.Envelope) error
+	// RouteWrite writes an envelope through the Hub routing path. Handles
+	// init-phase buffering (for WS conns) and droppable semantics internally.
+	RouteWrite(ctx context.Context, env *events.Envelope) error
 	Close() error
 }
 
@@ -219,6 +224,19 @@ func (h *Hub) removeSession(sessionID string, conn SessionWriter) {
 	}
 }
 
+// snapshotConns returns a snapshot of all SessionWriters subscribed to a session.
+// The snapshot is taken under RLock and is safe to iterate without holding the lock.
+func (h *Hub) snapshotConns(sessionID string) []SessionWriter {
+	h.mu.RLock()
+	sessionConns := h.sessions[sessionID]
+	conns := make([]SessionWriter, 0, len(sessionConns))
+	for conn := range sessionConns {
+		conns = append(conns, conn)
+	}
+	h.mu.RUnlock()
+	return conns
+}
+
 // JoinPlatformSession subscribes a PlatformConn to receive events for a session.
 // Unlike JoinSession, it does not register the connection in h.conns (no WS tracking)
 // and does not remove stale connections (platform SDK handles its own lifecycle).
@@ -310,13 +328,7 @@ func (h *Hub) SendToSession(ctx context.Context, env *events.Envelope, afterDrai
 }
 
 func (h *Hub) sendControlToSession(ctx context.Context, env *events.Envelope) {
-	h.mu.RLock()
-	sessionConns := h.sessions[env.SessionID]
-	conns := make([]SessionWriter, 0, len(sessionConns))
-	for conn := range sessionConns {
-		conns = append(conns, conn)
-	}
-	h.mu.RUnlock()
+	conns := h.snapshotConns(env.SessionID)
 
 	if len(conns) == 0 {
 		metrics.GatewayEventsNoSubscribersDropped.WithLabelValues(string(env.Event.Type)).Inc()
@@ -327,6 +339,7 @@ func (h *Hub) sendControlToSession(ctx context.Context, env *events.Envelope) {
 
 	env = events.Clone(env)
 	for _, conn := range conns {
+		metrics.GatewayMessagesTotal.WithLabelValues("outgoing", string(env.Event.Type)).Inc()
 		if err := conn.WriteCtx(ctx, env); err != nil {
 			h.log.Warn("gateway: send to conn failed", "session_id", env.SessionID, "err", err)
 		}
@@ -382,7 +395,7 @@ func (h *Hub) HandleHTTP(
 		h.JoinSession(sessionID, c)
 
 		// Start read pump in background. WritePump is started by newConn.
-		go c.ReadPump(handler)
+		go c.ReadPump(handler, handler.sm, auth)
 
 		idLog := userID
 		if pendingAuth {
@@ -439,13 +452,7 @@ func (h *Hub) Run() {
 }
 
 func (h *Hub) routeMessage(msg *EnvelopeWithConn) {
-	h.mu.RLock()
-	sessionConns := h.sessions[msg.Env.SessionID]
-	conns := make([]SessionWriter, 0, len(sessionConns))
-	for conn := range sessionConns {
-		conns = append(conns, conn)
-	}
-	h.mu.RUnlock()
+	conns := h.snapshotConns(msg.Env.SessionID)
 
 	if len(conns) == 0 {
 		metrics.GatewayEventsNoSubscribersDropped.WithLabelValues(string(msg.Env.Event.Type)).Inc()
@@ -465,39 +472,15 @@ func (h *Hub) routeMessage(msg *EnvelopeWithConn) {
 		h.LogHandler(level, fmt.Sprintf("event %s seq=%d", msg.Env.Event.Type, msg.Env.Seq), msg.Env.SessionID)
 	}
 
-	droppable := isDroppable(msg.Env.Event.Type)
-	var encoded []byte
-	var err error
 	for _, conn := range conns {
-		metrics.GatewayMessagesTotal.WithLabelValues("outgoing", string(msg.Env.Event.Type)).Inc()
-		if c, ok := conn.(*Conn); ok {
-			// Lazy encode: only compute when first WS conn is seen.
-			if encoded == nil {
-				encoded, err = aep.EncodeJSON(msg.Env)
-				if err != nil {
-					h.log.Warn("gateway: encode failed", "err", err)
-					return
-				}
-			}
-			// Droppable events (message.delta, raw) silently drop instead of disconnecting.
-			var writeErr error
-			if droppable {
-				writeErr = c.TryWriteMessage(websocket.TextMessage, encoded)
-			} else {
-				writeErr = c.WriteMessage(websocket.TextMessage, encoded)
-			}
-			if writeErr != nil {
-				h.log.Warn("gateway: write failed", "session_id", msg.Env.SessionID, "err", writeErr)
-				_ = conn.Close()
-			}
+		if err := conn.RouteWrite(context.Background(), msg.Env); err == nil {
+			continue
 		} else {
-			if err := conn.WriteCtx(context.Background(), msg.Env); err != nil {
-				h.log.Warn("gateway: platform write enqueue failed", "session_id", msg.Env.SessionID, "err", err)
-				_ = conn.Close()
-				h.mu.Lock()
-				h.removeSession(msg.Env.SessionID, conn)
-				h.mu.Unlock()
-			}
+			h.log.Warn("gateway: write failed", "session_id", msg.Env.SessionID, "err", err)
+			_ = conn.Close()
+			h.mu.Lock()
+			h.removeSession(msg.Env.SessionID, conn)
+			h.mu.Unlock()
 		}
 	}
 }

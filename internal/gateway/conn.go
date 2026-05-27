@@ -12,6 +12,7 @@ import (
 	"github.com/gorilla/websocket"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/hrygo/hotplex/internal/metrics"
 	"github.com/hrygo/hotplex/internal/session"
@@ -23,6 +24,27 @@ import (
 
 // platformWebChat is the platform tag for WebSocket webchat sessions.
 const platformWebChat = "webchat"
+
+// connHandler provides event handling capability for Conn.
+type connHandler interface {
+	Handle(ctx context.Context, env *events.Envelope) error
+}
+
+// connSM provides the session management subset that Conn needs for the
+// resolveSession* series (init handshake, existing session resume, deleted
+// session recreation) and ReadPump cleanup.
+type connSM interface {
+	Get(ctx context.Context, id string) (*session.SessionInfo, error)
+	GetWorker(id string) worker.Worker
+	Transition(ctx context.Context, id string, to events.SessionState) error
+	CreateWithBot(ctx context.Context, id, userID, botID string, wt worker.WorkerType, allowedTools []string, platform string, platformKey map[string]string, workDir, title string) (*session.SessionInfo, error)
+	DeletePhysical(ctx context.Context, id string) error
+}
+
+// connAuth provides authentication capability for deferred-init auth.
+type connAuth interface {
+	AuthenticateKey(ctx context.Context, key string) (string, bool)
+}
 
 // SessionStarter initiates a worker session. It is the only Bridge capability
 // used by Conn (called once during the AEP init handshake).
@@ -106,7 +128,7 @@ func (c *Conn) RemoteAddr() string {
 
 // ReadPump pumps messages from the WebSocket to the hub's broadcast channel.
 // It also handles pong responses, missed pong detection, and the AEP init handshake.
-func (c *Conn) ReadPump(handler *Handler) {
+func (c *Conn) ReadPump(handler connHandler, sm connSM, auth connAuth) {
 	defer func() {
 		if r := recover(); r != nil {
 			c.log.Error("gateway: panic in ReadPump", "session_id", c.sessionID, "panic", r, "stack", string(debug.Stack()))
@@ -118,9 +140,9 @@ func (c *Conn) ReadPump(handler *Handler) {
 		// can be routed through Hub.Run while the conn is still in h.sessions.
 		// If we unregister first, routeMessage finds no connections and the
 		// state event is silently dropped.
-		if c.sessionID != "" && handler.sm != nil {
-			if si, getErr := handler.sm.Get(context.Background(), c.sessionID); getErr == nil && si != nil && si.State == events.StateRunning {
-				if err := handler.sm.Transition(context.Background(), c.sessionID, events.StateIdle); err != nil {
+		if c.sessionID != "" && sm != nil {
+			if si, getErr := sm.Get(context.Background(), c.sessionID); getErr == nil && si != nil && si.State == events.StateRunning {
+				if err := sm.Transition(context.Background(), c.sessionID, events.StateIdle); err != nil {
 					c.log.Warn("gateway: conn close transition to idle", "session_id", c.sessionID, "err", err)
 				}
 			}
@@ -135,7 +157,7 @@ func (c *Conn) ReadPump(handler *Handler) {
 	c.wc.SetReadLimit(maxMessageSize)
 
 	// Phase 1: AEP init handshake — read the first message.
-	if err := c.performInit(handler); err != nil {
+	if err := c.performInit(auth, sm); err != nil {
 		c.log.Warn("gateway: init handshake failed", "session_id", c.sessionID, "err", err)
 		return
 	}
@@ -217,60 +239,73 @@ func (c *Conn) ReadPump(handler *Handler) {
 
 // performInit reads and processes the AEP init handshake message.
 // It blocks until either an init message is processed or an error occurs.
-func (c *Conn) performInit(handler *Handler) error {
+func (c *Conn) performInit(auth connAuth, sm connSM) error {
 	_, span := tracing.SpanFromContext(context.Background()).Start(context.Background(), "conn.init")
-	defer func() {
-		if span != nil {
-			span.End()
-		}
-	}()
-
+	defer span.End()
 	start := time.Now()
-	defer func() {
-		metrics.InitHandshakeDuration.Observe(time.Since(start).Seconds())
-	}()
+	defer func() { metrics.InitHandshakeDuration.Observe(time.Since(start).Seconds()) }()
 
-	// Read first message with a longer deadline (init may take time on cold start).
+	env, initData, err := c.readAndValidateInit()
+	if err != nil {
+		return err
+	}
+
+	if err := c.authenticateInit(auth, initData); err != nil {
+		return err
+	}
+
+	sessionID, si, err := c.resolveSession(env, initData, sm)
+	if err != nil {
+		return err
+	}
+
+	return c.finalizeInit(sessionID, si, initData, span)
+}
+
+// readAndValidateInit reads the first message, decodes it, and validates
+// that it is a well-formed AEP init envelope.
+func (c *Conn) readAndValidateInit() (*events.Envelope, InitData, error) {
 	_ = c.wc.SetReadDeadline(time.Now().Add(30 * time.Second))
 
 	_, data, err := c.wc.ReadMessage()
 	if err != nil {
-		return fmt.Errorf("read init: %w", err)
+		return nil, InitData{}, fmt.Errorf("read init: %w", err)
 	}
 
 	env, err := aep.DecodeLine(data)
 	if err != nil {
 		c.sendInitError(events.ErrCodeInvalidMessage, "malformed message: "+err.Error())
 		metrics.GatewayErrorsTotal.WithLabelValues(string(events.ErrCodeInvalidMessage)).Inc()
-		return err
+		return nil, InitData{}, err
 	}
 
-	// Only accept init message as first message.
 	if env.Event.Type != events.Init {
 		c.sendInitError(events.ErrCodeProtocolViolation, "expected init as first message, got "+string(env.Event.Type))
 		metrics.GatewayErrorsTotal.WithLabelValues(string(events.ErrCodeProtocolViolation)).Inc()
-		return fmt.Errorf("expected init, got %s", env.Event.Type)
+		return nil, InitData{}, fmt.Errorf("expected init, got %s", env.Event.Type)
 	}
 
 	metrics.GatewayMessagesTotal.WithLabelValues("incoming", string(events.Init)).Inc()
 
-	// Validate init fields.
 	initData, initErr := ValidateInit(env)
 	if initErr != nil {
 		c.sendInitError(initErr.Code, initErr.Message)
 		metrics.GatewayErrorsTotal.WithLabelValues(string(initErr.Code)).Inc()
-		return initErr
+		return nil, InitData{}, initErr
 	}
 
-	// Authenticate via init envelope if HTTP-level auth was deferred.
-	// Browser WebSocket clients cannot send custom headers, so auth is deferred
-	// to the first init message (pendingAuth is set when HandleHTTP finds no API key).
+	return env, initData, nil
+}
+
+// authenticateInit handles deferred authentication for browser WS clients
+// that cannot send custom HTTP headers.
+func (c *Conn) authenticateInit(auth connAuth, initData InitData) error {
 	if c.pendingAuth {
 		if initData.Auth.Token == "" {
 			c.sendInitError(events.ErrCodeUnauthorized, "authentication required")
 			return fmt.Errorf("deferred auth: no token in init envelope")
 		}
-		uid, ok := handler.auth.AuthenticateKey(context.Background(), initData.Auth.Token)
+		uid, ok := auth.AuthenticateKey(context.Background(), initData.Auth.Token)
 		if !ok {
 			c.sendInitError(events.ErrCodeUnauthorized, "invalid token")
 			return fmt.Errorf("deferred auth: invalid token")
@@ -279,14 +314,15 @@ func (c *Conn) performInit(handler *Handler) error {
 		c.pendingAuth = false
 	}
 
-	// Extract botID from init envelope for deferred-auth clients (browser WS
-	// clients that cannot send custom headers). Non-deferred clients already
-	// have botID set from X-Bot-ID header during WS upgrade (hub.go).
 	if c.botID == "" && initData.Auth.BotID != "" {
 		c.botID = initData.Auth.BotID
 	}
+	return nil
+}
 
-	// Resolve work dir: use client-provided value or default from config.
+// resolveSession resolves the session ID, checks throttling, and ensures
+// the session exists and is in the correct state (create/resume/fast-reconnect).
+func (c *Conn) resolveSession(env *events.Envelope, initData InitData, sm connSM) (string, *session.SessionInfo, error) {
 	workDir := initData.Config.WorkDir
 	if workDir == "" {
 		workDir = c.hub.cfgStore.Load().Worker.DefaultWorkDir
@@ -295,18 +331,14 @@ func (c *Conn) performInit(handler *Handler) error {
 	if err != nil {
 		c.sendInitError(events.ErrCodeInvalidMessage, err.Error())
 		metrics.GatewayErrorsTotal.WithLabelValues(string(events.ErrCodeInvalidMessage)).Inc()
-		return err
+		return "", nil, err
 	}
 	workDir = expanded
 
-	// Resolve session ID: clients put session_id at the envelope level
-	// (env.SessionID), not inside event.data. If the envelope session_id
-	// already exists in the DB (e.g., a derived UUID from REST API
-	// CreateSession), use it directly. Otherwise derive via UUIDv5.
 	var sessionID string
 	var preResolved *session.SessionInfo
 	if env.SessionID != "" {
-		if existing, getErr := handler.sm.Get(context.Background(), env.SessionID); getErr == nil && existing != nil && existing.State != events.StateDeleted {
+		if existing, getErr := sm.Get(context.Background(), env.SessionID); getErr == nil && existing != nil && existing.State != events.StateDeleted {
 			sessionID = env.SessionID
 			preResolved = existing
 		}
@@ -315,126 +347,175 @@ func (c *Conn) performInit(handler *Handler) error {
 		sessionID = session.DeriveSessionKey(c.userID, initData.WorkerType, env.SessionID, workDir)
 	}
 
-	// Check throttler before doing heavy work.
 	if !c.hub.InitThrottle.Check(sessionID) {
 		c.sendInitError(events.ErrCodeRateLimited, "too many failed attempts, please back off")
 		metrics.GatewayErrorsTotal.WithLabelValues(string(events.ErrCodeRateLimited)).Inc()
-		return fmt.Errorf("init throttled for session %s", sessionID)
+		return "", nil, fmt.Errorf("init throttled for session %s", sessionID)
 	}
 
-	// Enable init-phase buffering.
 	c.mu.Lock()
 	c.initDone = false
 	c.mu.Unlock()
 
-	// Subscribe to session BEFORE creation/resume.
 	c.hub.LeaveSession("", c)
 	c.hub.JoinSession(sessionID, c)
 
-	// Resolve session: create new or resume existing.
-	// Reuse preResolved when it's for the same session ID.
+	return c.resolveSessionState(sessionID, initData, workDir, sm, preResolved)
+}
+
+// resolveSessionState handles the session state machine transitions:
+// not-found → create, created → start, deleted → recreate,
+// idle/terminated → resume (with fresh-start fallback), running+alive → fast reconnect.
+func (c *Conn) resolveSessionState(sessionID string, initData InitData, workDir string, sm connSM, preResolved *session.SessionInfo) (string, *session.SessionInfo, error) {
 	var si *session.SessionInfo
+	var err error
+
 	if preResolved != nil {
 		si = preResolved
 	} else {
-		si, err = handler.sm.Get(context.Background(), sessionID)
+		si, err = sm.Get(context.Background(), sessionID)
 	}
+
 	if err != nil {
-		// Session does not exist → create and start via SessionStarter.
-		if errors.Is(err, session.ErrSessionNotFound) {
-			if c.starter != nil {
-				if err := c.starter.StartSession(context.Background(), sessionID, c.userID, c.botID, initData.WorkerType, initData.Config.AllowedTools, workDir, platformWebChat, nil, ""); err != nil {
-					c.hub.InitThrottle.RecordFailure(sessionID)
-					c.sendInitError(events.ErrCodeInternalError, "failed to create session")
-					metrics.GatewayErrorsTotal.WithLabelValues(string(events.ErrCodeInternalError)).Inc()
-					return fmt.Errorf("create session: %w", err)
-				}
-				si, err = handler.sm.Get(context.Background(), sessionID)
-				if err != nil {
-					c.hub.InitThrottle.RecordFailure(sessionID)
-					c.sendInitError(events.ErrCodeInternalError, "session not found after creation")
-					metrics.GatewayErrorsTotal.WithLabelValues(string(events.ErrCodeInternalError)).Inc()
-					return fmt.Errorf("get session after start: %w", err)
-				}
-			} else {
-				// Test mode
-				si, err = handler.sm.CreateWithBot(context.Background(), sessionID, c.userID, c.botID, initData.WorkerType, initData.Config.AllowedTools, platformWebChat, nil, workDir, "")
-				if err != nil {
-					c.hub.InitThrottle.RecordFailure(sessionID)
-					c.sendInitError(events.ErrCodeInternalError, "failed to create session")
-					return fmt.Errorf("create session: %w", err)
-				}
-			}
-		} else {
+		result, handleErr := c.handleSessionNotFound(sessionID, initData, workDir, sm, err)
+		return sessionID, result, handleErr
+	}
+
+	switch si.State {
+	case events.StateCreated:
+		result, stateErr := c.startCreatedSession(sessionID, initData, workDir, sm, si)
+		return sessionID, result, stateErr
+	case events.StateDeleted:
+		result, stateErr := c.recreateDeletedSession(sessionID, initData, workDir, sm)
+		return sessionID, result, stateErr
+	default:
+		result, stateErr := c.handleExistingSession(sessionID, workDir, sm, si, initData)
+		return sessionID, result, stateErr
+	}
+}
+
+func (c *Conn) handleSessionNotFound(sessionID string, initData InitData, workDir string, sm connSM, lookupErr error) (*session.SessionInfo, error) {
+	if !errors.Is(lookupErr, session.ErrSessionNotFound) {
+		c.hub.InitThrottle.RecordFailure(sessionID)
+		c.sendInitError(events.ErrCodeInternalError, lookupErr.Error())
+		return nil, fmt.Errorf("get session: %w", lookupErr)
+	}
+
+	if c.starter != nil {
+		if err := c.starter.StartSession(context.Background(), sessionID, c.userID, c.botID, initData.WorkerType, initData.Config.AllowedTools, workDir, platformWebChat, nil, ""); err != nil {
 			c.hub.InitThrottle.RecordFailure(sessionID)
-			c.sendInitError(events.ErrCodeInternalError, err.Error())
-			return fmt.Errorf("get session: %w", err)
+			c.sendInitError(events.ErrCodeInternalError, "failed to create session")
+			metrics.GatewayErrorsTotal.WithLabelValues(string(events.ErrCodeInternalError)).Inc()
+			return nil, fmt.Errorf("create session: %w", err)
 		}
-	} else if si.State == events.StateCreated {
-		if c.starter != nil {
-			if err := c.starter.StartSession(context.Background(), sessionID, c.userID, c.botID, initData.WorkerType, initData.Config.AllowedTools, workDir, platformWebChat, nil, ""); err != nil {
-				c.hub.InitThrottle.RecordFailure(sessionID)
-				c.sendInitError(events.ErrCodeInternalError, "failed to start session")
-				return fmt.Errorf("start unstarted session: %w", err)
-			}
-			si, err = handler.sm.Get(context.Background(), sessionID)
-			if err != nil {
-				c.sendInitError(events.ErrCodeInternalError, "session lost after creation")
-				return fmt.Errorf("get session after start: %w", err)
-			}
+		si, err := sm.Get(context.Background(), sessionID)
+		if err != nil {
+			c.hub.InitThrottle.RecordFailure(sessionID)
+			c.sendInitError(events.ErrCodeInternalError, "session not found after creation")
+			metrics.GatewayErrorsTotal.WithLabelValues(string(events.ErrCodeInternalError)).Inc()
+			return nil, fmt.Errorf("get session after start: %w", err)
 		}
-	} else if si.State == events.StateDeleted {
-		// Deleted sessions cannot be resumed. Physically remove then start fresh.
-		_ = handler.sm.DeletePhysical(context.Background(), sessionID)
-		if c.starter != nil {
-			if err := c.starter.StartSession(context.Background(), sessionID, c.userID, c.botID,
-				initData.WorkerType, initData.Config.AllowedTools, workDir, platformWebChat, nil, ""); err != nil {
-				c.hub.InitThrottle.RecordFailure(sessionID)
-				msg := fmt.Sprintf("failed to recreate deleted session: %v", err)
-				c.sendInitError(events.ErrCodeInternalError, msg)
-				metrics.GatewayErrorsTotal.WithLabelValues(string(events.ErrCodeInternalError)).Inc()
-				return fmt.Errorf("recreate deleted session: %w", err)
-			}
-			si, err = handler.sm.Get(context.Background(), sessionID)
-			if err != nil {
-				c.sendInitError(events.ErrCodeInternalError, "session lost after recreation")
-				return fmt.Errorf("get session after recreation: %w", err)
-			}
+		return si, nil
+	}
+
+	// Test mode: create directly via session manager.
+	si, err := sm.CreateWithBot(context.Background(), sessionID, c.userID, c.botID, initData.WorkerType, initData.Config.AllowedTools, platformWebChat, nil, workDir, "")
+	if err != nil {
+		c.hub.InitThrottle.RecordFailure(sessionID)
+		c.sendInitError(events.ErrCodeInternalError, "failed to create session")
+		return nil, fmt.Errorf("create session: %w", err)
+	}
+	return si, nil
+}
+
+func (c *Conn) startCreatedSession(sessionID string, initData InitData, workDir string, sm connSM, si *session.SessionInfo) (*session.SessionInfo, error) {
+	if c.starter == nil {
+		return si, nil // no starter in test mode, session stays CREATED
+	}
+	if err := c.starter.StartSession(context.Background(), sessionID, c.userID, c.botID, initData.WorkerType, initData.Config.AllowedTools, workDir, platformWebChat, nil, ""); err != nil {
+		c.hub.InitThrottle.RecordFailure(sessionID)
+		c.sendInitError(events.ErrCodeInternalError, "failed to start session")
+		metrics.GatewayErrorsTotal.WithLabelValues(string(events.ErrCodeInternalError)).Inc()
+		return nil, fmt.Errorf("start unstarted session: %w", err)
+	}
+	si, err := sm.Get(context.Background(), sessionID)
+	if err != nil {
+		c.sendInitError(events.ErrCodeInternalError, "session lost after creation")
+		return nil, fmt.Errorf("get session after start: %w", err)
+	}
+	return si, nil
+}
+
+func (c *Conn) recreateDeletedSession(sessionID string, initData InitData, workDir string, sm connSM) (*session.SessionInfo, error) {
+	_ = sm.DeletePhysical(context.Background(), sessionID)
+	if c.starter == nil {
+		// Test mode: re-create session directly since the old one was physically deleted.
+		newSI, err := sm.CreateWithBot(context.Background(), sessionID, c.userID, c.botID, initData.WorkerType, initData.Config.AllowedTools, platformWebChat, nil, workDir, "")
+		if err != nil {
+			return nil, fmt.Errorf("recreate deleted session (test mode): %w", err)
 		}
-	} else if w := handler.sm.GetWorker(sessionID); w != nil {
-		// Fast reconnect: worker still alive, skip terminate+resume cycle.
+		return newSI, nil
+	}
+	if err := c.starter.StartSession(context.Background(), sessionID, c.userID, c.botID,
+		initData.WorkerType, initData.Config.AllowedTools, workDir, platformWebChat, nil, ""); err != nil {
+		c.hub.InitThrottle.RecordFailure(sessionID)
+		c.sendInitError(events.ErrCodeInternalError, fmt.Sprintf("failed to recreate deleted session: %v", err))
+		metrics.GatewayErrorsTotal.WithLabelValues(string(events.ErrCodeInternalError)).Inc()
+		return nil, fmt.Errorf("recreate deleted session: %w", err)
+	}
+	si, err := sm.Get(context.Background(), sessionID)
+	if err != nil {
+		c.sendInitError(events.ErrCodeInternalError, "session lost after recreation")
+		return nil, fmt.Errorf("get session after recreation: %w", err)
+	}
+	return si, nil
+}
+
+func (c *Conn) handleExistingSession(sessionID, workDir string, sm connSM, si *session.SessionInfo, initData InitData) (*session.SessionInfo, error) {
+	// Fast reconnect: worker still alive, skip terminate+resume cycle.
+	if w := sm.GetWorker(sessionID); w != nil {
 		if si.State != events.StateRunning {
-			if err := handler.sm.Transition(context.Background(), sessionID, events.StateRunning); err != nil {
+			if err := sm.Transition(context.Background(), sessionID, events.StateRunning); err != nil {
 				c.log.Warn("gateway: fast reconnect transition failed", "session_id", sessionID, "from", si.State, "err", err)
 			} else {
 				si.State = events.StateRunning
 			}
 		}
-	} else if si.State == events.StateIdle || si.State == events.StateTerminated ||
-		(si.State == events.StateRunning) {
-		if c.starter != nil {
-			resumeErr := c.starter.ResumeSession(context.Background(), sessionID, workDir)
-			if resumeErr != nil {
-				if err := c.starter.StartSession(context.Background(), sessionID, c.userID, c.botID,
-					initData.WorkerType, initData.Config.AllowedTools, workDir, platformWebChat, nil, ""); err != nil {
-					c.hub.InitThrottle.RecordFailure(sessionID)
-					msg := fmt.Sprintf("resume failed (%v), then start also failed (%v)", resumeErr, err)
-					c.sendInitError(events.ErrCodeInternalError, msg)
-					metrics.GatewayErrorsTotal.WithLabelValues(string(events.ErrCodeInternalError)).Inc()
-					return fmt.Errorf("start session after resume fallback: %w", err)
-				}
-			}
-			si, err = handler.sm.Get(context.Background(), sessionID)
-			if err != nil {
-				c.sendInitError(events.ErrCodeInternalError, "session lost after resume")
-				return fmt.Errorf("get session after resume: %w", err)
-			}
-		}
+		return si, nil
 	}
 
+	// State guard: Created/Deleted are handled by startCreatedSession/recreateDeletedSession
+	// in resolveSessionState; only idle, terminated, or running (zombie) reach this resume path.
+	if si.State != events.StateIdle && si.State != events.StateTerminated && si.State != events.StateRunning {
+		return si, nil
+	}
+
+	if c.starter == nil {
+		return si, nil
+	}
+
+	resumeErr := c.starter.ResumeSession(context.Background(), sessionID, workDir)
+	if resumeErr != nil {
+		if err := c.starter.StartSession(context.Background(), sessionID, c.userID, c.botID,
+			initData.WorkerType, initData.Config.AllowedTools, workDir, platformWebChat, nil, ""); err != nil {
+			c.hub.InitThrottle.RecordFailure(sessionID)
+			msg := fmt.Sprintf("resume failed (%v), then start also failed (%v)", resumeErr, err)
+			c.sendInitError(events.ErrCodeInternalError, msg)
+			metrics.GatewayErrorsTotal.WithLabelValues(string(events.ErrCodeInternalError)).Inc()
+			return nil, fmt.Errorf("start session after resume fallback: %w", err)
+		}
+	}
+	si, err := sm.Get(context.Background(), sessionID)
+	if err != nil {
+		c.sendInitError(events.ErrCodeInternalError, "session lost after resume")
+		return nil, fmt.Errorf("get session after resume: %w", err)
+	}
+	return si, nil
+}
+
+// finalizeInit performs security checks, sends init_ack, and marks init complete.
+func (c *Conn) finalizeInit(sessionID string, si *session.SessionInfo, initData InitData, span trace.Span) error {
 	// SEC-008: reject cross-user access on reconnect.
-	// DeriveSessionKey is the primary isolation mechanism; this check provides
-	// defense-in-depth against key collisions or direct UUID lookups.
 	if c.userID != "" && si.UserID != "" && c.userID != si.UserID {
 		c.hub.InitThrottle.RecordFailure(sessionID)
 		c.sendInitError(events.ErrCodeUnauthorized, "user_id mismatch")
@@ -450,16 +531,13 @@ func (c *Conn) performInit(handler *Handler) error {
 		return fmt.Errorf("bot_id mismatch: connection=%s session=%s", c.botID, si.BotID)
 	}
 
-	// Success!
 	c.hub.InitThrottle.RecordSuccess(sessionID)
 
-	// Update connection's session ID.
 	c.mu.Lock()
 	c.sessionID = sessionID
 	c.userID = si.UserID
 	c.mu.Unlock()
 
-	// Send init_ack.
 	ack := BuildInitAck(sessionID, si.State, initData.WorkerType)
 	ack.Seq = c.hub.NextSeq(sessionID)
 	if err := c.WriteCtx(context.Background(), ack); err != nil {
@@ -566,10 +644,55 @@ func (c *Conn) WriteCtx(ctx context.Context, env *events.Envelope) error {
 
 	select {
 	case c.writeCh <- data:
-		metrics.GatewayMessagesTotal.WithLabelValues("outgoing", string(env.Event.Type)).Inc()
 		return nil
 	case <-c.done:
 		return errors.New("conn closed")
+	}
+}
+
+// RouteWrite writes an envelope through the Hub routing path. It handles
+// init-phase buffering and applies droppable semantics for delta/raw events
+// (silently drops on full channel instead of disconnecting).
+func (c *Conn) RouteWrite(_ context.Context, env *events.Envelope) error {
+	metrics.GatewayMessagesTotal.WithLabelValues("outgoing", string(env.Event.Type)).Inc()
+	data, err := aep.EncodeJSON(env)
+	if err != nil {
+		return err
+	}
+	// Handle init-phase buffering and closed check.
+	if handled, err := c.bufferOrReject(data); handled {
+		return err
+	}
+	// Post-init: apply droppable vs reliable write semantics.
+	if isDroppable(env.Event.Type) {
+		return c.trySendData(data)
+	}
+	return c.sendData(data)
+}
+
+// sendData writes pre-encoded data to the write channel. Disconnects the
+// client if the channel is full (backpressure for reliable events).
+func (c *Conn) sendData(data []byte) error {
+	select {
+	case c.writeCh <- data:
+		return nil
+	default:
+		c.log.Warn("gateway: slow client, write channel full, disconnecting", "session_id", c.sessionID)
+		metrics.GatewayErrorsTotal.WithLabelValues("slow_client").Inc()
+		_ = c.Close()
+		return errors.New("write channel full, slow client disconnected")
+	}
+}
+
+// trySendData attempts to write pre-encoded data without blocking.
+// Silently drops the message if the channel is full (for droppable events).
+func (c *Conn) trySendData(data []byte) error {
+	select {
+	case c.writeCh <- data:
+		return nil
+	default:
+		metrics.GatewayDeltasDropped.Inc()
+		return nil
 	}
 }
 
@@ -674,5 +797,6 @@ func (c *Conn) sendError(code events.ErrorCode, msg string) {
 		Code:    code,
 		Message: msg,
 	})
+	metrics.GatewayMessagesTotal.WithLabelValues("outgoing", string(events.Error)).Inc()
 	_ = c.WriteCtx(context.Background(), env)
 }
