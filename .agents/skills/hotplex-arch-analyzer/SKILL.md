@@ -1,6 +1,6 @@
 ---
 name: hotplex-arch-analyzer
-description: HotPlex 项目架构、代码健康和性能优化深度审计 — **立即调用此 skill 进行**：架构分析、代码质量审查、SOLID/DRY 合规检查、并发安全审计、**性能优化识别**（热路径分配、锁竞争、sync.Pool、JSON 编码开销）、安全扫描、非功能分析、代码健康度改进、模块质量评估、存量 issue 审计与清理。**专为 HotPlex Gateway 多层架构优化**（WebSocket/Session/Worker/Messaging），内建 HotPlex 热路径性能模式库（WritePump、Hub 广播、Streaming Card、Worker stdio、Event Store），自动创建/验证 GitHub Issue。增量式模块分析 + 存量 issue 审计 + 跨会话进度追踪 + 优先级排序 = **最有效的 /loop 循环执行工具**，适用于大型 Go 代码库的系统性审计。**采用 Subagent 隔离执行**：文件读取和深度分析在独立 subagent 中完成，主会话只处理结构化 JSON 结果，将每模块上下文消耗降低 97%。**当提到**：性能分析、性能优化、瓶颈定位、延迟优化、内存分配、锁竞争、pprof、benchmark、热路径优化、吞吐量提升 — 即使没有明确说"架构分析"也应使用此 skill。
+description: HotPlex 架构深度审计 — 架构分析、SOLID/DRY 合规、并发安全、性能优化、安全扫描、存量 issue 审计与清理。自动创建 GitHub Issue，支持 /loop 循环执行。当提到架构分析、代码质量、性能优化、瓶颈定位、锁竞争、热路径优化时使用。
 ---
 
 # 架构深度分析器

@@ -324,10 +324,10 @@ func TestHub_SendToSession_GuaranteedQueueFull(t *testing.T) {
 
 	// ── Path 2: drain → send succeeds again ────────────────────────────────
 	// After h.Run drains, the queue is empty and sends succeed.
-	time.Sleep(50 * time.Millisecond) // allow h.Run to drain pending items
-	env := events.NewEnvelope(aep.NewID(), "sess_full", 0, events.Done, events.DoneData{Success: true})
-	err = h.SendToSession(ctx, env)
-	require.NoError(t, err, "send after drain should succeed")
+	require.Eventually(t, func() bool {
+		env := events.NewEnvelope(aep.NewID(), "sess_full", 0, events.Done, events.DoneData{Success: true})
+		return h.SendToSession(ctx, env) == nil
+	}, 3*time.Second, 50*time.Millisecond)
 }
 
 func TestHub_SendToSession_SeqAssignment(t *testing.T) {

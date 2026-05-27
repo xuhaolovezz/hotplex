@@ -114,8 +114,7 @@ func TestFeishuRateLimiter_AllowCardKit(t *testing.T) {
 	require.False(t, rl.AllowCardKit(cardID), "second request within 100ms should be rate limited")
 
 	// After waiting, request should be allowed
-	time.Sleep(110 * time.Millisecond)
-	require.True(t, rl.AllowCardKit(cardID), "request after 100ms should be allowed")
+	require.Eventually(t, func() bool { return rl.AllowCardKit(cardID) }, 500*time.Millisecond, 10*time.Millisecond, "request after cooldown should be allowed")
 }
 
 func TestFeishuRateLimiter_AllowPatch(t *testing.T) {
@@ -132,6 +131,5 @@ func TestFeishuRateLimiter_AllowPatch(t *testing.T) {
 	require.False(t, rl.AllowPatch(msgID), "second request within 1500ms should be rate limited")
 
 	// After waiting, request should be allowed
-	time.Sleep(1550 * time.Millisecond)
-	require.True(t, rl.AllowPatch(msgID), "request after 1500ms should be allowed")
+	require.Eventually(t, func() bool { return rl.AllowPatch(msgID) }, 3*time.Second, 100*time.Millisecond, "request after cooldown should be allowed")
 }

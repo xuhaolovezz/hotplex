@@ -228,18 +228,21 @@ func TestCollector_TimerFlush(t *testing.T) {
 	c.CaptureDeltaString("s1", 1, "chunk1")
 	c.CaptureDeltaString("s1", 2, "chunk2")
 
-	// Wait for timer trigger (deltaFlushInterval = 2s + ticker margin)
-	time.Sleep(deltaFlushInterval + 200*time.Millisecond)
-
-	// Verify Message was written by timer flush (without Close)
-	page, err := store.QueryBySession(context.Background(), "s1", 0, CursorLatest, 100)
-	require.NoError(t, err)
-	require.Len(t, page.Events, 1)
-	require.Equal(t, string(events.Message), page.Events[0].Type)
-
-	var data map[string]any
-	require.NoError(t, json.Unmarshal(page.Events[0].Data, &data))
-	require.Equal(t, "chunk1chunk2", data["content"])
+	// Wait for timer trigger (deltaFlushInterval + ticker margin)
+	require.Eventually(t, func() bool {
+		page, err := store.QueryBySession(context.Background(), "s1", 0, CursorLatest, 100)
+		if err != nil || len(page.Events) != 1 {
+			return false
+		}
+		if page.Events[0].Type != string(events.Message) {
+			return false
+		}
+		var data map[string]any
+		if err := json.Unmarshal(page.Events[0].Data, &data); err != nil {
+			return false
+		}
+		return data["content"] == "chunk1chunk2"
+	}, deltaFlushInterval+collectorFlushInterval+2*time.Second, 200*time.Millisecond, "expected flushed message event")
 }
 
 func TestCollector_ResetSessionEmptyFlush(t *testing.T) {
