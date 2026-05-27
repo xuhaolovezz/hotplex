@@ -22,7 +22,7 @@ func TestErrorType(t *testing.T) {
 		err  error
 		want string
 	}{
-		{"nil", nil, "unknown"},
+		{"nil", nil, "execution"},
 		{"timeout", errors.New("context timeout exceeded"), "timeout"},
 		{"deadline", errors.New("deadline exceeded"), "timeout"},
 		{"rate limit", errors.New("rate limit hit"), "rate_limit"},
@@ -31,6 +31,8 @@ func TestErrorType(t *testing.T) {
 		{"502", errors.New("502 bad gateway"), "server_error"},
 		{"503", errors.New("503 unavailable"), "server_error"},
 		{"504", errors.New("504 service unavailable"), "server_error"},
+		{"connection refused", errors.New("dial tcp: connection refused"), "timeout"},
+		{"temporary", errors.New("temporary failure"), "timeout"},
 		{"execution", errors.New("worker not found"), "execution"},
 		{"other", errors.New("something else"), "execution"},
 	}
@@ -282,4 +284,47 @@ func TestGenerateJobID(t *testing.T) {
 	id := GenerateJobID()
 	require.True(t, strings.HasPrefix(id, "cron_"))
 	require.Len(t, id, 5+36) // "cron_" (5) + UUID (36) = 41
+}
+
+// panicBridge panics on StartSession to test panic recovery in onTick.
+type panicBridge struct{}
+
+func (panicBridge) StartSession(_ context.Context, _, _, _ string, _ worker.WorkerType, _ []string, _, _ string, _ map[string]string, _ string) error {
+	panic("test panic in bridge")
+}
+
+func TestOnTick_PanicRecovery(t *testing.T) {
+	store := newTestStore(t)
+	sm := &mockSessionStateChecker{
+		sessions: map[string]*session.SessionInfo{},
+		workers:  map[string]worker.Worker{},
+	}
+	s := &Scheduler{
+		log:           slog.Default(),
+		store:         store,
+		executor:      NewExecutor(slog.Default(), panicBridge{}, sm),
+		maxConcurrent: 3,
+		ctx:           context.Background(),
+		jobs:          map[string]*CronJob{},
+		tickLoop:      newTimerLoop(&Scheduler{}),
+	}
+	s.tickLoop.scheduler = s
+
+	now := time.Now()
+	job := helperJob("panic-recovery")
+	job.State.NextRunAtMs = now.Add(-1 * time.Second).UnixMilli()
+	require.NoError(t, store.Create(context.Background(), job))
+	s.jobs[job.ID] = job
+
+	s.tickLoop.onTick()
+	s.closed.Store(true)
+	s.tickLoop.stop()
+	s.wg.Wait()
+
+	// After panic recovery, the job must not be stuck in running state.
+	got := s.jobs[job.ID]
+	require.Equal(t, int64(0), got.State.RunningAtMs,
+		"RunningAtMs must be cleared after panic recovery")
+	require.Equal(t, StatusFailed, got.State.LastStatus)
+	require.Equal(t, 1, got.State.ConsecutiveErrs)
 }
