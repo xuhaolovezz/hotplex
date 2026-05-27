@@ -221,14 +221,14 @@ func TestCollector_TimerFlush(t *testing.T) {
 	}
 
 	store := newTestStore(t)
-	c := NewCollector(store, slog.Default())
+	c := NewCollectorWithIntervals(store, slog.Default(), 50*time.Millisecond, 100*time.Millisecond)
 	defer func() { _ = c.Close() }()
 
 	// Accumulate small content (< 4096) so size trigger won't fire
 	c.CaptureDeltaString("s1", 1, "chunk1")
 	c.CaptureDeltaString("s1", 2, "chunk2")
 
-	// Wait for timer trigger (deltaFlushInterval + ticker margin)
+	// Wait for timer trigger (deltaFlush + ticker margin)
 	require.Eventually(t, func() bool {
 		page, err := store.QueryBySession(context.Background(), "s1", 0, CursorLatest, 100)
 		if err != nil || len(page.Events) != 1 {
@@ -242,7 +242,7 @@ func TestCollector_TimerFlush(t *testing.T) {
 			return false
 		}
 		return data["content"] == "chunk1chunk2"
-	}, deltaFlushInterval+collectorFlushInterval+2*time.Second, 200*time.Millisecond, "expected flushed message event")
+	}, 500*time.Millisecond, 50*time.Millisecond, "expected flushed message event")
 }
 
 func TestCollector_ResetSessionEmptyFlush(t *testing.T) {
@@ -376,7 +376,7 @@ func TestCollector_ReasoningTimerFlush(t *testing.T) {
 	}
 
 	store := newTestStore(t)
-	c := NewCollector(store, slog.Default())
+	c := NewCollectorWithIntervals(store, slog.Default(), 50*time.Millisecond, 100*time.Millisecond)
 	defer func() { _ = c.Close() }()
 
 	c.CaptureReasoningString("s1", 1, "think1")
@@ -395,7 +395,7 @@ func TestCollector_ReasoningTimerFlush(t *testing.T) {
 			return false
 		}
 		return data["content"] == "think1think2"
-	}, deltaFlushInterval+collectorFlushInterval+2*time.Second, 200*time.Millisecond, "expected flushed reasoning event")
+	}, 500*time.Millisecond, 50*time.Millisecond, "expected flushed reasoning event")
 }
 
 func TestCollector_CaptureReasoningViaCapture(t *testing.T) {
