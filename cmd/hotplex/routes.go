@@ -38,7 +38,7 @@ func setupRoutes(
 	withCORS := func(h http.HandlerFunc) http.HandlerFunc {
 		return func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Access-Control-Allow-Origin", "*")
-			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
 			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Api-Key")
 			if r.Method == http.MethodOptions {
 				w.WriteHeader(http.StatusOK)
@@ -95,8 +95,11 @@ func setupRoutes(
 			}
 			return forkRestartHelper(inst, deps.ConfigPath, deps.DevMode, true)
 		},
-		DB:         deps.DB,
-		DBResolver: deps.DBResolver,
+		DB:           deps.DB,
+		DBResolver:   deps.DBResolver,
+		KeyValidator: deps.Auth,
+		APIKeyStore:  deps.APIKeyStore,
+		WriteMu:      deps.WriteMu,
 	})
 
 	if cfg.Admin.RateLimitEnabled {

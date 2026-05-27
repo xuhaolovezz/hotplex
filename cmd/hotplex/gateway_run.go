@@ -61,7 +61,6 @@ type GatewayDeps struct {
 	Hub             *gateway.Hub
 	SessionMgr      *session.Manager
 	EventStore      eventStoreProvider
-	EventCollector  *eventstore.Collector
 	Auth            *security.Authenticator
 	Handler         *gateway.Handler
 	Bridge          *gateway.Bridge
@@ -220,6 +219,26 @@ func runGateway(configPath string, devMode bool, stopCh <-chan struct{}) (err er
 		log.Info("gateway: API key resolver: database")
 	}
 
+	// Preload database-sourced API keys into Phase 1 validation so that
+	// keys created via Admin API are valid immediately after gateway restart.
+	if stores.sqlDB != nil {
+		rows, err := stores.sqlDB.QueryContext(ctx, "SELECT api_key FROM api_key_users")
+		if err != nil {
+			log.Warn("gateway: preload DB API keys failed", "error", err)
+		} else {
+			defer func() { _ = rows.Close() }()
+			for rows.Next() {
+				var key string
+				if rows.Scan(&key) == nil {
+					auth.AddKey(key)
+				}
+			}
+			if err := rows.Err(); err != nil {
+				log.Warn("gateway: preload DB API keys incomplete", "error", err)
+			}
+		}
+	}
+
 	retryCtrl := gateway.NewLLMRetryController(cfg.Worker.AutoRetry, log)
 
 	agentConfigDir := ""
@@ -280,7 +299,7 @@ func runGateway(configPath string, devMode bool, stopCh <-chan struct{}) (err er
 
 	cfgStore.RegisterFunc(func(prev, next *config.Config) {
 		if !reflect.DeepEqual(prev.ResolvedAPIKeyUsers, next.ResolvedAPIKeyUsers) {
-			dbR := security.NewDBResolver(stores.sqlDB)
+			dbR := stores.dbResolver
 			if len(next.ResolvedAPIKeyUsers) > 0 {
 				auth.SetKeyResolver(security.NewChainResolver(security.NewMapResolver(next.ResolvedAPIKeyUsers), dbR))
 			} else {
@@ -373,7 +392,6 @@ func runGateway(configPath string, devMode bool, stopCh <-chan struct{}) (err er
 		Hub:             hub,
 		SessionMgr:      sm,
 		EventStore:      stores.event,
-		EventCollector:  stores.collector,
 		Auth:            auth,
 		Handler:         handler,
 		Bridge:          bridge,
@@ -599,6 +617,7 @@ type gatewayStores struct {
 	writeMu     *sqlutil.WriteMu // nil when using PostgreSQL (WriteMu is SQLite-only)
 	db          *dbutil.DB
 	sqlDB       *sql.DB
+	dialect     dbutil.Dialect
 	apiKeyStore admin.APIKeyUserStorer
 	dbResolver  *security.DBResolver
 }
@@ -631,7 +650,7 @@ func initSQLiteStores(ctx context.Context, cfg *config.Config, log *slog.Logger)
 
 	// EventStore shares the session store's *sql.DB (schema managed by goose migration 002).
 	eventStore := eventstore.NewSQLiteStore(sessionStore.DB(), writeMu)
-	dbResolver := security.NewDBResolver(sessionStore.DB())
+	dbResolver := security.NewDBResolver(sessionStore.DB(), dbutil.DialectSQLite)
 
 	return &gatewayStores{
 		session:     sessionStore,
@@ -640,6 +659,7 @@ func initSQLiteStores(ctx context.Context, cfg *config.Config, log *slog.Logger)
 		collector:   eventstore.NewCollector(eventStore, log),
 		writeMu:     writeMu,
 		sqlDB:       sessionStore.DB(),
+		dialect:     dbutil.DialectSQLite,
 		dbResolver:  dbResolver,
 	}, nil
 }
@@ -660,7 +680,7 @@ func initPGStores(ctx context.Context, cfg *config.Config, log *slog.Logger) (*g
 	eventStore := eventstore.NewPGStore(db, log)
 	cronStore := cron.NewPGStore(db, log)
 	chatAccessStore := messaging.NewChatAccessPGStore(db, log)
-	dbResolver := security.NewDBResolver(db.DB)
+	dbResolver := security.NewDBResolver(db.DB, dbutil.DialectPostgres)
 
 	return &gatewayStores{
 		session:     sessionStore,
@@ -671,6 +691,7 @@ func initPGStores(ctx context.Context, cfg *config.Config, log *slog.Logger) (*g
 		chatAccess:  chatAccessStore,
 		db:          db,
 		sqlDB:       db.DB,
+		dialect:     dbutil.DialectPostgres,
 		apiKeyStore: admin.NewAPIKeyUserPGStore(db, dbResolver),
 		dbResolver:  dbResolver,
 	}, nil
