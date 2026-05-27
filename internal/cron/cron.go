@@ -4,8 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"os"
-	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -119,7 +117,7 @@ func (s *Scheduler) Start(ctx context.Context) error {
 	}
 
 	s.log.Info("cron: scheduler started", "jobs", len(s.jobs))
-	s.releaseSkillManual()
+	ReleaseSkillManual(s.log)
 
 	s.tickLoop.arm(s.nextTickDuration(time.Now()))
 	return nil
@@ -261,26 +259,33 @@ func (s *Scheduler) TriggerJob(ctx context.Context, job *CronJob) error {
 	return nil
 }
 
-// loadFromDB loads all jobs from SQLite into the in-memory index.
+// loadFromDB loads all jobs from the store into the in-memory index.
 // It clears stale running_at_ms, applies catch-up logic for missed jobs within grace period,
 // and recomputes next_run for past-due recurring jobs.
+// Store writes are performed outside s.mu to avoid lock-ordering deadlock with CreateJob/UpdateJob.
 func (s *Scheduler) loadFromDB(ctx context.Context) error {
 	jobs, err := s.store.List(ctx, false)
 	if err != nil {
 		return err
 	}
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	now := time.Now()
 	var catchUp []*CronJob
 
+	type stateUpdate struct {
+		id    string
+		state CronJobState
+	}
+	var stateUpdates []stateUpdate
+	var jobUpdates []*CronJob
+
+	// First pass: build in-memory index and collect pending store writes.
+	s.mu.Lock()
 	for _, job := range jobs {
 		// Clear stale running_at_ms from previous crash.
 		if job.State.RunningAtMs > 0 {
 			job.State.RunningAtMs = 0
-			_ = s.store.UpdateState(ctx, job.ID, job.State)
+			stateUpdates = append(stateUpdates, stateUpdate{job.ID, job.State})
 		}
 
 		if !job.Enabled || job.State.NextRunAtMs <= 0 {
@@ -303,14 +308,27 @@ func (s *Scheduler) loadFromDB(ctx context.Context) error {
 				if next.IsZero() {
 					// One-shot past due and outside grace → disable.
 					job.Enabled = false
-					_ = s.store.Update(ctx, job)
+					jobUpdates = append(jobUpdates, job)
 				} else {
 					job.State.NextRunAtMs = next.UnixMilli()
-					_ = s.store.UpdateState(ctx, job.ID, job.State)
+					stateUpdates = append(stateUpdates, stateUpdate{job.ID, job.State})
 				}
 			}
 		}
 		s.jobs[job.ID] = job
+	}
+	s.mu.Unlock()
+
+	// Second pass: persist state changes outside the lock to avoid deadlock.
+	for _, u := range stateUpdates {
+		if err := s.store.UpdateState(ctx, u.id, u.state); err != nil {
+			s.log.Error("cron: persist stale state on load", "job_id", u.id, "err", err)
+		}
+	}
+	for _, job := range jobUpdates {
+		if err := s.store.Update(ctx, job); err != nil {
+			s.log.Error("cron: persist disabled job on load", "job_id", job.ID, "err", err)
+		}
 	}
 
 	// Execute catch-up jobs (max 5 immediate, rest staggered 5s).
@@ -496,22 +514,6 @@ func (s *Scheduler) rebuildIndex() {
 // GenerateJobID creates a unique cron job identifier.
 func GenerateJobID() string {
 	return "cron_" + uuid.New().String()
-}
-
-func (s *Scheduler) releaseSkillManual() {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		s.log.Warn("cron: cannot determine home dir for skill manual release", "err", err)
-		return
-	}
-	dir := filepath.Join(home, ".hotplex", "skills")
-	_ = os.MkdirAll(dir, 0o755)
-	path := filepath.Join(dir, "cron.md")
-	if err := os.WriteFile(path, []byte(SkillManual()), 0o644); err != nil {
-		s.log.Warn("cron: failed to release skill manual", "path", path, "err", err)
-		return
-	}
-	s.log.Debug("cron: skill manual released", "path", path)
 }
 
 // UpdateConfig applies live configuration changes without restart.

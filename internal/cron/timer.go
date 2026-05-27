@@ -3,7 +3,6 @@ package cron
 import (
 	"context"
 	"errors"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -136,12 +135,17 @@ func (tl *timerLoop) onTick() {
 		s.wg.Add(1)
 		go func(j *CronJob) {
 			defer func() {
-				tl.releaseSlot()
-				s.wg.Done()
 				if r := recover(); r != nil {
 					s.log.Error("cron: panic in executeJob",
 						"job_id", j.ID, "name", j.Name, "panic", r)
+					j.State.RunningAtMs = 0
+					j.State.LastStatus = StatusFailed
+					j.State.ConsecutiveErrs++
+					s.mergeJobState(j.ID, j.State, false)
+					s.persistState(j.ID, j.State)
 				}
+				tl.releaseSlot()
+				s.wg.Done()
 			}()
 			metrics.CronFiresTotal.WithLabelValues(j.Name).Inc()
 			s.executeJob(j)
@@ -354,7 +358,9 @@ func (s *Scheduler) persistState(jobID string, state CronJobState) {
 // survive scheduler shutdown (e.g., deleting a completed one-shot job).
 func (s *Scheduler) persistCtx() context.Context {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	go cancel()
+	// Cancel after timeout fires to release resources immediately rather than
+	// waiting for GC. The timeout itself prevents indefinite blocking.
+	time.AfterFunc(5*time.Second, cancel)
 	return ctx
 }
 
@@ -364,28 +370,4 @@ func (s *Scheduler) jobTimeout(job *CronJob) time.Duration {
 		return time.Duration(job.TimeoutSec) * time.Second
 	}
 	return s.defaultTimeout
-}
-
-// errorType classifies an error for the error_type metric label.
-func errorType(err error) string {
-	if err == nil {
-		return "unknown"
-	}
-	msg := strings.ToLower(err.Error())
-	for _, tok := range []string{"timeout", "deadline exceeded"} {
-		if strings.Contains(msg, tok) {
-			return "timeout"
-		}
-	}
-	for _, tok := range []string{"rate limit", "429"} {
-		if strings.Contains(msg, tok) {
-			return "rate_limit"
-		}
-	}
-	for _, tok := range []string{"500", "502", "503", "504"} {
-		if strings.Contains(msg, tok) {
-			return "server_error"
-		}
-	}
-	return "execution"
 }
