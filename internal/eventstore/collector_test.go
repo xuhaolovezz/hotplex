@@ -379,16 +379,20 @@ func TestCollector_ReasoningTimerFlush(t *testing.T) {
 	c.CaptureReasoningString("s1", 1, "think1")
 	c.CaptureReasoningString("s1", 2, "think2")
 
-	time.Sleep(deltaFlushInterval + 200*time.Millisecond)
-
-	page, err := store.QueryBySession(context.Background(), "s1", 0, CursorLatest, 100)
-	require.NoError(t, err)
-	require.Len(t, page.Events, 1)
-	require.Equal(t, string(events.Reasoning), page.Events[0].Type)
-
-	var data map[string]any
-	require.NoError(t, json.Unmarshal(page.Events[0].Data, &data))
-	require.Equal(t, "think1think2", data["content"])
+	require.Eventually(t, func() bool {
+		page, err := store.QueryBySession(context.Background(), "s1", 0, CursorLatest, 100)
+		if err != nil || len(page.Events) != 1 {
+			return false
+		}
+		if page.Events[0].Type != string(events.Reasoning) {
+			return false
+		}
+		var data map[string]any
+		if err := json.Unmarshal(page.Events[0].Data, &data); err != nil {
+			return false
+		}
+		return data["content"] == "think1think2"
+	}, deltaFlushInterval+collectorFlushInterval+2*time.Second, 200*time.Millisecond, "expected flushed reasoning event")
 }
 
 func TestCollector_CaptureReasoningViaCapture(t *testing.T) {
