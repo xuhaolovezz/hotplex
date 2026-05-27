@@ -345,3 +345,61 @@ func TestYuanxinConn_ImplementsPlatformConn(t *testing.T) {
 	var conn messaging.PlatformConn = &YuanxinConn{}
 	require.NotNil(t, conn)
 }
+
+func TestMetadataString(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		md   map[string]any
+		key  string
+		want string
+	}{
+		{"nil map", nil, "key", ""},
+		{"empty map", map[string]any{}, "key", ""},
+		{"key missing", map[string]any{"other": "val"}, "key", ""},
+		{"string value", map[string]any{"replyUserCodes": "u-123"}, "replyUserCodes", "u-123"},
+		{"non-string value", map[string]any{"count": 42}, "count", ""},
+		{"bool value", map[string]any{"flag": true}, "flag", ""},
+		{"empty string", map[string]any{"name": ""}, "name", ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(t, tt.want, metadataString(tt.md, tt.key))
+		})
+	}
+}
+
+func TestAdapter_Close_WithoutStart(t *testing.T) {
+	t.Parallel()
+	a := newTestAdapter()
+
+	require.False(t, a.IsClosed())
+	err := a.Close(context.Background())
+	require.NoError(t, err)
+	require.True(t, a.IsClosed())
+}
+
+func TestAdapter_Close_IdempotentMarkClosed(t *testing.T) {
+	t.Parallel()
+	a := newTestAdapter()
+
+	err := a.Close(context.Background())
+	require.NoError(t, err)
+	require.True(t, a.IsClosed())
+
+	err = a.Close(context.Background())
+	require.NoError(t, err)
+	require.True(t, a.IsClosed())
+}
+
+func TestAdapter_GetConnResources_NilFields(t *testing.T) {
+	t.Parallel()
+	a := &Adapter{}
+
+	consumer, producer := a.getConnResources()
+	require.Nil(t, consumer)
+	require.Nil(t, producer)
+}

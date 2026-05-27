@@ -38,6 +38,9 @@ type Adapter struct {
 	client        pulsar.Client
 	consumer      pulsar.Consumer
 	producer      pulsar.Producer
+
+	cancelFunc   context.CancelFunc
+	consumerDone chan struct{}
 }
 
 func (a *Adapter) Platform() messaging.PlatformType { return messaging.PlatformYuanxin }
@@ -87,7 +90,9 @@ func (a *Adapter) Start(ctx context.Context) error {
 		return NewYuanxinConn(a, channelID, threadKey, a.Bridge().WorkDir())
 	})
 
-	go a.runConsumer(ctx)
+	consumerCtx, cancel := context.WithCancel(ctx)
+	a.cancelFunc = cancel
+	go a.runConsumer(consumerCtx)
 	return nil
 }
 
@@ -116,7 +121,7 @@ func (a *Adapter) runConsumer(ctx context.Context) {
 		default:
 		}
 
-		if err := a.connect(ctx); err != nil {
+		if err := a.connect(); err != nil {
 			a.Log.Warn("yuanxin: connection failed, reconnecting", "err", err, "attempt", attempt)
 			backoffDelay := backoff.Next()
 			select {
@@ -130,10 +135,35 @@ func (a *Adapter) runConsumer(ctx context.Context) {
 
 		backoff.Reset()
 		attempt = 1
+
+		consumer, producer := a.getConnResources()
+		if consumer == nil || producer == nil {
+			continue
+		}
+
+		done := make(chan struct{})
+		a.mu.Lock()
+		a.consumerDone = done
+		a.mu.Unlock()
+
+		go a.consumeLoop(ctx, consumer, done)
+
+		select {
+		case <-ctx.Done():
+			return
+		case <-done:
+			a.Log.Warn("yuanxin: consume loop exited, reconnecting", "attempt", attempt)
+		}
 	}
 }
 
-func (a *Adapter) connect(ctx context.Context) error {
+func (a *Adapter) getConnResources() (pulsar.Consumer, pulsar.Producer) {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.consumer, a.producer
+}
+
+func (a *Adapter) connect() error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
@@ -189,12 +219,12 @@ func (a *Adapter) connect(ctx context.Context) error {
 
 	a.Log.Info("yuanxin: connected", "consumer_topic", consumerTopic, "producer_topic", producerTopic)
 
-	go a.consumeLoop(ctx)
-
 	return nil
 }
 
-func (a *Adapter) consumeLoop(ctx context.Context) {
+func (a *Adapter) consumeLoop(ctx context.Context, consumer pulsar.Consumer, done chan struct{}) {
+	defer close(done)
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -202,22 +232,22 @@ func (a *Adapter) consumeLoop(ctx context.Context) {
 		default:
 		}
 
-		msg, err := a.consumer.Receive(ctx)
+		msg, err := consumer.Receive(ctx)
 		if err != nil {
 			if ctx.Err() != nil {
 				return
 			}
-			a.Log.Warn("yuanxin: receive error", "err", err)
-			continue
+			a.Log.Warn("yuanxin: receive error, exiting consume loop", "err", err)
+			return
 		}
 
-		a.Log.Info("yuanxin: message received from Pulsar", "msg_id", msg.ID().String(), "payload_len", len(msg.Payload()), "payload", string(msg.Payload()))
+		a.Log.Debug("yuanxin: message received from Pulsar", "msg_id", msg.ID().String(), "payload_len", len(msg.Payload()))
 
 		if err := a.handleMessage(ctx, msg); err != nil {
 			a.Log.Error("yuanxin: handle message error", "err", err)
 		}
 
-		if err := a.consumer.Ack(msg); err != nil {
+		if err := consumer.Ack(msg); err != nil {
 			a.Log.Error("yuanxin: ack message error", "err", err)
 		}
 	}
@@ -251,8 +281,16 @@ func (a *Adapter) handleMessage(ctx context.Context, msg pulsar.Message) error {
 		return nil
 	}
 
-	connKey := fmt.Sprintf("%s#%s", platformMsgID, platformMsgID)
-	conn := a.GetOrCreateConn(connKey, "")
+	userID := metadataString(yuanxinMsg.Metadata, "replyUserCodes")
+	channelID := metadataString(yuanxinMsg.Metadata, "messageId")
+	if userID == "" {
+		userID = platformMsgID
+	}
+	if channelID == "" {
+		channelID = platformMsgID
+	}
+
+	conn := a.GetOrCreateConn(userID, channelID)
 
 	if len(yuanxinMsg.Metadata) > 0 {
 		conn.SetMetadata(yuanxinMsg.Metadata)
@@ -261,9 +299,9 @@ func (a *Adapter) handleMessage(ctx context.Context, msg pulsar.Message) error {
 	envelope := a.Bridge().MakeEnvelope(platformMsgID, text, session.PlatformContext{
 		Platform:  string(messaging.PlatformYuanxin),
 		BotID:     a.appID,
-		ChannelID: platformMsgID,
-		ThreadTS:  platformMsgID,
-		UserID:    platformMsgID,
+		ChannelID: channelID,
+		ThreadTS:  channelID,
+		UserID:    userID,
 		WorkDir:   a.Bridge().WorkDir(),
 	})
 	if envelope == nil {
@@ -288,10 +326,42 @@ func (a *Adapter) HandleTextMessage(_ context.Context, _, _, _, _, _, _ string) 
 	return nil
 }
 
-func (a *Adapter) Close(ctx context.Context) error {
-	a.mu.Lock()
-	defer a.mu.Unlock()
+func metadataString(md map[string]any, key string) string {
+	if md == nil {
+		return ""
+	}
+	v, ok := md[key]
+	if !ok {
+		return ""
+	}
+	s, ok := v.(string)
+	if !ok {
+		return ""
+	}
+	return s
+}
 
+func (a *Adapter) Close(ctx context.Context) error {
+	a.Log.Info("yuanxin: adapter closing")
+
+	if a.cancelFunc != nil {
+		a.cancelFunc()
+	}
+
+	a.mu.RLock()
+	done := a.consumerDone
+	a.mu.RUnlock()
+	if done != nil {
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			a.Log.Warn("yuanxin: timed out waiting for consumer loop to exit")
+		}
+	}
+
+	a.MarkClosed()
+
+	a.mu.Lock()
 	if a.consumer != nil {
 		a.consumer.Close()
 		a.consumer = nil
@@ -304,9 +374,11 @@ func (a *Adapter) Close(ctx context.Context) error {
 		a.client.Close()
 		a.client = nil
 	}
+	a.mu.Unlock()
 
 	a.CloseSharedState()
-	for _, conn := range a.DrainConns() {
+	conns := a.DrainConns()
+	for _, conn := range conns {
 		_ = conn.Close()
 	}
 

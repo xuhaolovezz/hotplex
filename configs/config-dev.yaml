@@ -51,5 +51,5 @@ messaging:
     work_dir: "./.hotplex/workspace"
     tenant: "public"
     namespace: "default"
-    app_id: "${YUANXIN_APP_ID}"
-    pulsar_url: "${YUANXIN_PULSAR_URL}"
+    app_id: "695E4978394F4523"
+    pulsar_url: "pulsar://101.43.152.19:6650"

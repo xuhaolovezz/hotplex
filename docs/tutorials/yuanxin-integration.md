@@ -154,7 +154,14 @@ pulsar producer connected  tenant=public  namespace=default
 
 ```json
 {
-  "metadata": {},
+  "metadata": {
+    "botId": "695E4978394F4523",
+    "replyUserCodes": "002287",
+    "sysId": 1,
+    "messageId": "002287-1",
+    "secret": "123",
+    "platform": "yx"
+  },
   "msg": "你好，请帮我写一个排序算法"
 }
 ```
@@ -164,6 +171,12 @@ pulsar producer connected  tenant=public  namespace=default
 | 字段 | 类型 | 说明 |
 |------|------|------|
 | `metadata` | object | 消息元数据，包含用户标识、会话信息等扩展字段 |
+| `metadata.botId` | string | 机器人应用 ID |
+| `metadata.replyUserCodes` | string | 用户标识，用于会话连续性 |
+| `metadata.sysId` | int | 系统 ID |
+| `metadata.messageId` | string | 消息/会话标识，用于路由响应 |
+| `metadata.secret` | string | 鉴权密钥 |
+| `metadata.platform` | string | 来源平台标识 |
 | `msg` | string | 用户发送的文本消息内容 |
 
 HotPlex Gateway 的响应同样以 JSON 格式发回 Pulsar，原心平台消费后呈现给用户。
