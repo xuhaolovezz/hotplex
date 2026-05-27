@@ -4,8 +4,9 @@ package messaging
 type PlatformType string
 
 const (
-	PlatformSlack  PlatformType = "slack"
-	PlatformFeishu PlatformType = "feishu"
+	PlatformSlack   PlatformType = "slack"
+	PlatformFeishu  PlatformType = "feishu"
+	PlatformYuanxin PlatformType = "yuanxin"
 )
 
 // ExtractPlatformKeys pulls platform-specific fields from generic metadata.
@@ -31,6 +32,13 @@ func (p PlatformType) ExtractPlatformKeys(md map[string]any) map[string]string {
 		}
 		if v, ok := md["thread_ts"].(string); ok {
 			pk["thread_ts"] = v
+		}
+		if v, ok := md["user_id"].(string); ok && v != "" {
+			pk["user_id"] = v
+		}
+	case PlatformYuanxin:
+		if v, ok := md["channel_id"].(string); ok && v != "" {
+			pk["channel_id"] = v
 		}
 		if v, ok := md["user_id"].(string); ok && v != "" {
 			pk["user_id"] = v

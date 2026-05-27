@@ -130,8 +130,9 @@ type MessagingConfig struct {
 	TTSConfig  `mapstructure:",squash"`
 
 	// Platform-specific configs.
-	Slack  SlackConfig  `mapstructure:"slack"`
-	Feishu FeishuConfig `mapstructure:"feishu"`
+	Slack   SlackConfig   `mapstructure:"slack"`
+	Feishu  FeishuConfig  `mapstructure:"feishu"`
+	Yuanxin YuanxinConfig `mapstructure:"yuanxin"`
 }
 
 // STT constants for provider values.
@@ -316,6 +317,17 @@ type FeishuBotConfig struct {
 
 	STTConfig `mapstructure:",squash"`
 	TTSConfig `mapstructure:",squash"`
+}
+
+// YuanxinConfig holds Yuanxin Pulsar adapter settings.
+type YuanxinConfig struct {
+	MessagingPlatformConfig `mapstructure:",squash"`
+
+	Tenant        string `mapstructure:"tenant"`
+	Namespace     string `mapstructure:"namespace"`
+	PulsarURL     string `mapstructure:"pulsar_url"`
+	AppID         string `mapstructure:"app_id"`
+	ProducerTopic string `mapstructure:"producer_topic"`
 }
 
 type AdminConfig struct {
@@ -671,6 +683,9 @@ func Default() *Config {
 			Slack: SlackConfig{
 				MessagingPlatformConfig: defaultMessagingPlatformConfig(),
 			},
+			Yuanxin: YuanxinConfig{
+				MessagingPlatformConfig: defaultMessagingPlatformConfig(),
+			},
 		},
 		AgentConfig: AgentConfig{
 			Enabled:   true,
@@ -709,6 +724,7 @@ func propagateMessagingDefaults(cfg *Config) {
 	msg := &cfg.Messaging
 	propagatePlatform(&msg.Slack.MessagingPlatformConfig, msg)
 	propagatePlatform(&msg.Feishu.MessagingPlatformConfig, msg)
+	propagatePlatform(&msg.Yuanxin.MessagingPlatformConfig, msg)
 
 	// Propagate shared defaults into per-bot configs.
 	for i := range msg.Slack.Bots {
@@ -1105,6 +1121,10 @@ func (c *Config) ResolvePlatformWorkDir(platform string) string {
 	case "feishu":
 		if c.Messaging.Feishu.WorkDir != "" {
 			return c.Messaging.Feishu.WorkDir
+		}
+	case "yuanxin":
+		if c.Messaging.Yuanxin.WorkDir != "" {
+			return c.Messaging.Yuanxin.WorkDir
 		}
 	}
 	return c.Worker.DefaultWorkDir
