@@ -209,7 +209,11 @@ func (m *CodexAppServerManager) Call(method string, params any) (json.RawMessage
 		return nil, fmt.Errorf("codex-app-server: write request: %w", err)
 	}
 
-	timer := time.NewTimer(defaultCallTimeout)
+	callTimeout := m.cfg.CallTimeout
+	if callTimeout <= 0 {
+		callTimeout = defaultCallTimeout
+	}
+	timer := time.NewTimer(callTimeout)
 	defer timer.Stop()
 
 	select {
@@ -221,7 +225,7 @@ func (m *CodexAppServerManager) Call(method string, params any) (json.RawMessage
 		return resp.Result, nil
 	case <-timer.C:
 		return nil, fmt.Errorf("codex-app-server: %s: timeout after %v",
-			method, defaultCallTimeout)
+			method, callTimeout)
 	}
 }
 

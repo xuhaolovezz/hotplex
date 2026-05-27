@@ -563,6 +563,7 @@ type CodexCLIConfig struct {
 	Ephemeral       bool          `mapstructure:"ephemeral"`         // ephemeral sessions, default true
 	Personality     string        `mapstructure:"personality"`       // agent personality for app-server mode, default "friendly"
 	StartupTimeout  time.Duration `mapstructure:"startup_timeout"`   // process startup timeout, default 30s
+	CallTimeout     time.Duration `mapstructure:"call_timeout"`      // JSON-RPC call timeout, default 30s
 	UseAppServer    bool          `mapstructure:"use_app_server"`    // use persistent app-server mode instead of one-shot exec
 	IdleDrainPeriod time.Duration `mapstructure:"idle_drain_period"` // idle drain timeout for app-server mode, default 30m
 }
@@ -738,6 +739,7 @@ func Default() *Config {
 				Ephemeral:       true,
 				Personality:     "friendly",
 				StartupTimeout:  30 * time.Second,
+				CallTimeout:     30 * time.Second,
 				UseAppServer:    true,
 				IdleDrainPeriod: 30 * time.Minute,
 			},

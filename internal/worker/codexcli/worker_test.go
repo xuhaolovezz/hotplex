@@ -843,7 +843,7 @@ func TestExecWorkerBuildArgsWithModel(t *testing.T) {
 
 func newTestAppServerWorker(t *testing.T) *AppServerWorker {
 	t.Helper()
-	cfg := config.CodexCLIConfig{IdleDrainPeriod: time.Minute}
+	cfg := config.CodexCLIConfig{IdleDrainPeriod: time.Minute, StartupTimeout: time.Second, CallTimeout: time.Second}
 	mgr := NewCodexAppServerManager(slog.Default(), cfg)
 	return &AppServerWorker{
 		BaseWorker: base.NewBaseWorker(slog.Default(), nil),
@@ -1203,7 +1203,7 @@ func TestManagerAcquireStartsProcess(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping: requires codex binary")
 	}
-	cfg := config.CodexCLIConfig{IdleDrainPeriod: time.Minute}
+	cfg := config.CodexCLIConfig{IdleDrainPeriod: time.Minute, StartupTimeout: time.Second, CallTimeout: time.Second}
 	mgr := NewCodexAppServerManager(slog.Default(), cfg)
 
 	// Acquire will try to start the process, which requires codex binary.
