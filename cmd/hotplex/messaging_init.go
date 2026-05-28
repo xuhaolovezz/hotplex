@@ -373,8 +373,12 @@ func fillYuanxinExtras(acfg *messaging.AdapterConfig, appCfg *config.Config) {
 	if platformCfg.ProducerTopic != "" {
 		acfg.Extras["producer_topic"] = platformCfg.ProducerTopic
 	}
-	acfg.Extras["tenant"] = platformCfg.Tenant
-	acfg.Extras["namespace"] = platformCfg.Namespace
+	if platformCfg.Tenant != "" {
+		acfg.Extras["tenant"] = platformCfg.Tenant
+	}
+	if platformCfg.Namespace != "" {
+		acfg.Extras["namespace"] = platformCfg.Namespace
+	}
 }
 
 func buildFeishuTranscriber(sttCfg config.STTConfig, appID, appSecret string, log *slog.Logger) stt.Transcriber {

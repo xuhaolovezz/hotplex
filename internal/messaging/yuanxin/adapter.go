@@ -180,18 +180,22 @@ func (a *Adapter) getConnResources() (pulsar.Consumer, pulsar.Producer) {
 
 func (a *Adapter) cleanupConn() {
 	a.mu.Lock()
-	defer a.mu.Unlock()
-	if a.consumer != nil {
-		a.consumer.Close()
-		a.consumer = nil
+	consumer := a.consumer
+	producer := a.producer
+	client := a.client
+	a.consumer = nil
+	a.producer = nil
+	a.client = nil
+	a.mu.Unlock()
+
+	if consumer != nil {
+		consumer.Close()
 	}
-	if a.producer != nil {
-		a.producer.Close()
-		a.producer = nil
+	if producer != nil {
+		producer.Close()
 	}
-	if a.client != nil {
-		a.client.Close()
-		a.client = nil
+	if client != nil {
+		client.Close()
 	}
 }
 
@@ -248,7 +252,7 @@ func (a *Adapter) connect() error {
 		producer.Close()
 		consumer.Close()
 		client.Close()
-		a.Log.Debug("yuanxin: connect raced with close, resources already available")
+		a.Log.Debug("yuanxin: connect: another connect() completed first, discarding duplicate resources")
 		return nil
 	}
 	a.client = client
@@ -464,19 +468,23 @@ func (a *Adapter) Close(ctx context.Context) error {
 	a.MarkClosed()
 
 	a.mu.Lock()
-	if a.consumer != nil {
-		a.consumer.Close()
-		a.consumer = nil
-	}
-	if a.producer != nil {
-		a.producer.Close()
-		a.producer = nil
-	}
-	if a.client != nil {
-		a.client.Close()
-		a.client = nil
-	}
+	consumer := a.consumer
+	producer := a.producer
+	client := a.client
+	a.consumer = nil
+	a.producer = nil
+	a.client = nil
 	a.mu.Unlock()
+
+	if consumer != nil {
+		consumer.Close()
+	}
+	if producer != nil {
+		producer.Close()
+	}
+	if client != nil {
+		client.Close()
+	}
 
 	a.CloseSharedState()
 	conns := a.DrainConns()
