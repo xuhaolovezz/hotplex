@@ -70,6 +70,10 @@ func (a *Adapter) ConfigureWith(config messaging.AdapterConfig) error {
 	if a.producerTopic == "" {
 		a.producerTopic = "global-open-claw-response-topic"
 	}
+
+	if a.appID == "" {
+		return fmt.Errorf("yuanxin: app_id is required")
+	}
 	return nil
 }
 
@@ -507,6 +511,8 @@ func (c *YuanxinConn) WriteCtx(ctx context.Context, env *events.Envelope) error 
 		return c.sendElicitationRequest(ctx, env)
 	case events.ContextUsage:
 		return c.sendContextUsage(ctx, env)
+	case events.MessageDelta:
+		return nil
 	}
 
 	text, ok := messaging.ExtractResponseText(env)
