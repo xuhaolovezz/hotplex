@@ -38,16 +38,16 @@ func (p PlatformType) ExtractPlatformKeys(md map[string]any) map[string]string {
 		}
 	case PlatformYuanxin:
 		if v, ok := md["messageId"].(string); ok && v != "" {
-			pk["messageId"] = v
+			pk["message_id"] = v
 		}
 		if v, ok := md["replyUserCodes"].(string); ok && v != "" {
-			pk["replyUserCodes"] = v
+			pk["reply_user_codes"] = v
 		}
 		if v, ok := md["secret"].(string); ok {
 			pk["secret"] = v
 		}
 		if v, ok := md["sysId"].(string); ok {
-			pk["sysId"] = v
+			pk["sys_id"] = v
 		}
 	}
 	// bot_id is platform-agnostic — extracted for all platform types.

@@ -50,6 +50,8 @@ var _ messaging.CronResultSender = (*Adapter)(nil)
 
 func (a *Adapter) GetBotID() string { return a.appID }
 
+// ConfigureWith initializes adapter fields. Must be called before Start;
+// after Start returns, these fields are read-only and accessed without locks.
 func (a *Adapter) ConfigureWith(config messaging.AdapterConfig) error {
 	_ = a.PlatformAdapter.ConfigureWith(config)
 	a.ConfigureShared(config)
@@ -205,13 +207,18 @@ func (a *Adapter) connect() error {
 		a.mu.Unlock()
 		return nil
 	}
+	var oldClient pulsar.Client
 	if a.client != nil {
-		a.client.Close()
+		oldClient = a.client
 		a.client = nil
 		a.consumer = nil
 		a.producer = nil
 	}
 	a.mu.Unlock()
+
+	if oldClient != nil {
+		oldClient.Close()
+	}
 
 	client, err := pulsar.NewClient(pulsar.ClientOptions{
 		URL: a.pulsarURL,
@@ -389,17 +396,17 @@ func (a *Adapter) HandleTextMessage(_ context.Context, _, _, _, _, _, _ string) 
 }
 
 func (a *Adapter) SendCronResult(ctx context.Context, text string, platformKey map[string]string) error {
-	messageID := platformKey["messageId"]
+	messageID := platformKey["message_id"]
 	if messageID == "" {
-		return fmt.Errorf("yuanxin: missing messageId in platform_key")
+		return fmt.Errorf("yuanxin: missing message_id in platform_key")
 	}
 	text = messaging.SanitizeText(text)
 
 	md := map[string]any{
 		"botId":          a.appID,
 		"messageId":      messageID,
-		"replyUserCodes": platformKey["replyUserCodes"],
-		"sysId":          platformKey["sysId"],
+		"replyUserCodes": platformKey["reply_user_codes"],
+		"sysId":          platformKey["sys_id"],
 		"platform":       "yx",
 	}
 	if secret, ok := platformKey["secret"]; ok {
@@ -467,24 +474,7 @@ func (a *Adapter) Close(ctx context.Context) error {
 
 	a.MarkClosed()
 
-	a.mu.Lock()
-	consumer := a.consumer
-	producer := a.producer
-	client := a.client
-	a.consumer = nil
-	a.producer = nil
-	a.client = nil
-	a.mu.Unlock()
-
-	if consumer != nil {
-		consumer.Close()
-	}
-	if producer != nil {
-		producer.Close()
-	}
-	if client != nil {
-		client.Close()
-	}
+	a.cleanupConn()
 
 	a.CloseSharedState()
 	conns := a.DrainConns()
@@ -514,7 +504,7 @@ func (a *Adapter) SendResponse(ctx context.Context, conn *YuanxinConn, content s
 		return fmt.Errorf("yuanxin: marshal response: %w", err)
 	}
 
-	a.Log.Info("yuanxin: sending response to pulsar",
+	a.Log.Debug("yuanxin: sending response to pulsar",
 		"content_len", len(content),
 		"metadata_keys", len(response.Metadata))
 
@@ -524,10 +514,12 @@ func (a *Adapter) SendResponse(ctx context.Context, conn *YuanxinConn, content s
 	if err != nil {
 		a.Log.Error("yuanxin: failed to send response to pulsar", "err", err)
 	} else {
-		a.Log.Info("yuanxin: response sent to pulsar successfully")
+		a.Log.Debug("yuanxin: response sent to pulsar successfully")
 	}
 	return err
 }
+
+const maxTextBuilderSize = 1 << 20
 
 type YuanxinConn struct {
 	adapter     *Adapter
@@ -612,7 +604,9 @@ func (c *YuanxinConn) WriteCtx(ctx context.Context, env *events.Envelope) error 
 	case events.MessageDelta:
 		if d, ok := env.Event.Data.(events.MessageDeltaData); ok && d.Content != "" {
 			c.mu.Lock()
-			c.textBuilder.WriteString(d.Content)
+			if c.textBuilder.Len() < maxTextBuilderSize {
+				c.textBuilder.WriteString(d.Content)
+			}
 			c.mu.Unlock()
 		}
 		return nil

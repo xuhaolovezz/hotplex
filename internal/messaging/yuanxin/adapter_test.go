@@ -480,7 +480,7 @@ func TestAdapter_SendCronResult_MissingMessageId(t *testing.T) {
 
 	err := a.SendCronResult(context.Background(), "hello", map[string]string{})
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "missing messageId")
+	require.Contains(t, err.Error(), "missing message_id")
 }
 
 func TestAdapter_SendCronResult_NoProducer(t *testing.T) {
@@ -488,7 +488,7 @@ func TestAdapter_SendCronResult_NoProducer(t *testing.T) {
 	a := newTestAdapter()
 
 	err := a.SendCronResult(context.Background(), "hello", map[string]string{
-		"messageId": "msg-123",
+		"message_id": "msg-123",
 	})
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "producer not initialized")

@@ -156,8 +156,6 @@ func buildDeliverySuffix(job *CronJob) string {
 		return buildSlackDelivery(job)
 	case "feishu":
 		return buildFeishuDelivery(job)
-	case "yuanxin":
-		return buildYuanxinDelivery(job)
 	default:
 		return ""
 	}
@@ -187,13 +185,6 @@ func buildFeishuDelivery(job *CronJob) string {
 		cmd = fmt.Sprintf("lark-cli im +messages-send --as bot --chat-id %s --markdown \"结果内容\"", chatID)
 	}
 	return fmt.Sprintf(deliveryBlockFmt, job.Name, cmd)
-}
-
-// buildYuanxinDelivery returns empty — Yuanxin cron results are delivered
-// exclusively via adapter-level SendCronResult (CronResultSender interface).
-// No CLI delivery command is available for Yuanxin.
-func buildYuanxinDelivery(job *CronJob) string {
-	return ""
 }
 
 const deliveryBlockFmt = `

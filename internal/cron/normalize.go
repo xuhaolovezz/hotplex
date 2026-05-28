@@ -11,9 +11,8 @@ import (
 // for CLI-based result delivery. Used by ValidateJob, HasCLIDelivery, and
 // buildDeliverySuffix to avoid duplicating platform→key mappings.
 var RequiredPlatformKey = map[string]string{
-	"feishu":  "chat_id",
-	"slack":   "channel_id",
-	"yuanxin": "messageId",
+	"feishu": "chat_id",
+	"slack":  "channel_id",
 }
 
 var threatPatterns = []string{
