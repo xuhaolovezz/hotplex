@@ -188,18 +188,17 @@ func (a *Adapter) cleanupConn() {
 
 func (a *Adapter) connect() error {
 	a.mu.Lock()
-	defer a.mu.Unlock()
-
 	if a.consumer != nil && a.producer != nil {
+		a.mu.Unlock()
 		return nil
 	}
-
 	if a.client != nil {
 		a.client.Close()
 		a.client = nil
 		a.consumer = nil
 		a.producer = nil
 	}
+	a.mu.Unlock()
 
 	client, err := pulsar.NewClient(pulsar.ClientOptions{
 		URL: a.pulsarURL,
@@ -234,9 +233,11 @@ func (a *Adapter) connect() error {
 		return fmt.Errorf("yuanxin: create producer: %w", err)
 	}
 
+	a.mu.Lock()
 	a.client = client
 	a.consumer = consumer
 	a.producer = producer
+	a.mu.Unlock()
 
 	a.Log.Info("yuanxin: connected", "consumer_topic", consumerTopic, "producer_topic", producerTopic)
 

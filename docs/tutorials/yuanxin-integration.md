@@ -86,6 +86,7 @@ messaging:
 | `namespace` | string | Pulsar 命名空间 |
 | `app_id` | string | 原心平台应用 ID，支持环境变量引用 |
 | `pulsar_url` | string | Pulsar Broker 地址，支持环境变量引用 |
+| `producer_topic` | string | 响应消息发送的 Pulsar Topic（默认 `global-open-claw-response-topic`） |
 
 ---
 
@@ -175,7 +176,7 @@ pulsar producer connected  tenant=public  namespace=default
 | `metadata.replyUserCodes` | string | 用户标识，用于会话连续性 |
 | `metadata.sysId` | int | 系统 ID |
 | `metadata.messageId` | string | 消息/会话标识，用于路由响应 |
-| `metadata.secret` | string | 消息扩展字段，原心平台用于消息扩展，传给 Worker 处理 |
+| `metadata.secret` | string | 消息扩展字段，原心平台用于消息扩展，传给 Worker 处理。此字段不由 Gateway 校验，安全依赖 Pulsar 和原心平台认证 |
 | `metadata.platform` | string | 来源平台标识 |
 | `msg` | string | 用户发送的文本消息内容 |
 
