@@ -46,7 +46,7 @@ messaging:
     enabled: true
     worker_type: "claude_code"
   yuanxin:
-    enabled: true
+    enabled: false
     worker_type: "claude_code"
     work_dir: "./.hotplex/workspace"
     tenant: "public"
