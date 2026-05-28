@@ -190,12 +190,7 @@ func buildFeishuDelivery(job *CronJob) string {
 }
 
 func buildYuanxinDelivery(job *CronJob) string {
-	messageID := job.PlatformKey[RequiredPlatformKey["yuanxin"]]
-	if messageID == "" {
-		return ""
-	}
-	cmd := fmt.Sprintf("hotplex yuanxin send-result --message-id %s --text \"结果内容\"", messageID)
-	return fmt.Sprintf(deliveryBlockFmt, job.Name, cmd)
+	return ""
 }
 
 const deliveryBlockFmt = `

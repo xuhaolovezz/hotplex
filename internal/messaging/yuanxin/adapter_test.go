@@ -433,7 +433,7 @@ func TestYuanxinConn_DeltaAccumulation(t *testing.T) {
 	require.NoError(t, err)
 
 	conn.mu.RLock()
-	got := conn.accumulatedText
+	got := conn.textBuilder.String()
 	conn.mu.RUnlock()
 	require.Equal(t, "Hello World", got)
 }
@@ -469,7 +469,7 @@ func TestYuanxinConn_DoneSendsAccumulatedText(t *testing.T) {
 	require.Contains(t, err.Error(), "producer not initialized")
 
 	conn.mu.RLock()
-	got := conn.accumulatedText
+	got := conn.textBuilder.String()
 	conn.mu.RUnlock()
 	require.Equal(t, "", got)
 }
@@ -531,7 +531,7 @@ func TestYuanxinConn_ErrorClearsAccumulatedText(t *testing.T) {
 	require.Contains(t, err.Error(), "producer not initialized")
 
 	conn.mu.RLock()
-	got := conn.accumulatedText
+	got := conn.textBuilder.String()
 	conn.mu.RUnlock()
 	require.Equal(t, "", got)
 }

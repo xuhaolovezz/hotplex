@@ -502,13 +502,13 @@ func (a *Adapter) SendResponse(ctx context.Context, conn *YuanxinConn, content s
 }
 
 type YuanxinConn struct {
-	adapter         *Adapter
-	channelID       string
-	threadKey       string
-	workDir         string
-	metadata        map[string]any
-	accumulatedText string
-	mu              sync.RWMutex
+	adapter     *Adapter
+	channelID   string
+	threadKey   string
+	workDir     string
+	metadata    map[string]any
+	textBuilder strings.Builder
+	mu          sync.RWMutex
 }
 
 func NewYuanxinConn(adapter *Adapter, channelID, threadKey, workDir string) *YuanxinConn {
@@ -551,8 +551,8 @@ func (c *YuanxinConn) WriteCtx(ctx context.Context, env *events.Envelope) error 
 	case events.Done:
 		c.adapter.Interactions.CancelAll(env.SessionID)
 		c.mu.Lock()
-		text := c.accumulatedText
-		c.accumulatedText = ""
+		text := c.textBuilder.String()
+		c.textBuilder.Reset()
 		c.mu.Unlock()
 		if text == "" {
 			return nil
@@ -561,7 +561,7 @@ func (c *YuanxinConn) WriteCtx(ctx context.Context, env *events.Envelope) error 
 	case events.Error:
 		c.adapter.Interactions.CancelAll(env.SessionID)
 		c.mu.Lock()
-		c.accumulatedText = ""
+		c.textBuilder.Reset()
 		c.mu.Unlock()
 		if errMsg := messaging.ExtractErrorMessage(env); errMsg != "" {
 			return c.adapter.SendResponse(ctx, c, errMsg)
@@ -578,7 +578,7 @@ func (c *YuanxinConn) WriteCtx(ctx context.Context, env *events.Envelope) error 
 	case events.MessageDelta:
 		if d, ok := env.Event.Data.(events.MessageDeltaData); ok && d.Content != "" {
 			c.mu.Lock()
-			c.accumulatedText += d.Content
+			c.textBuilder.WriteString(d.Content)
 			c.mu.Unlock()
 		}
 		return nil
@@ -607,6 +607,7 @@ func (c *YuanxinConn) Close() error {
 func (c *YuanxinConn) sendPermissionRequest(ctx context.Context, env *events.Envelope) error {
 	d, err := messaging.ExtractPermissionData(env)
 	if err != nil {
+		c.adapter.Log.Warn("yuanxin: extract permission data failed", "err", err, "session_id", env.SessionID)
 		return nil
 	}
 
@@ -617,6 +618,7 @@ func (c *YuanxinConn) sendPermissionRequest(ctx context.Context, env *events.Env
 func (c *YuanxinConn) sendQuestionRequest(ctx context.Context, env *events.Envelope) error {
 	d, err := messaging.ExtractQuestionData(env)
 	if err != nil {
+		c.adapter.Log.Warn("yuanxin: extract question data failed", "err", err, "session_id", env.SessionID)
 		return nil
 	}
 
@@ -631,6 +633,7 @@ func (c *YuanxinConn) sendQuestionRequest(ctx context.Context, env *events.Envel
 func (c *YuanxinConn) sendElicitationRequest(ctx context.Context, env *events.Envelope) error {
 	d, err := messaging.ExtractElicitationData(env)
 	if err != nil {
+		c.adapter.Log.Warn("yuanxin: extract elicitation data failed", "err", err, "session_id", env.SessionID)
 		return nil
 	}
 
@@ -641,6 +644,7 @@ func (c *YuanxinConn) sendElicitationRequest(ctx context.Context, env *events.En
 func (c *YuanxinConn) sendContextUsage(ctx context.Context, env *events.Envelope) error {
 	d, err := messaging.ExtractContextUsageData(env)
 	if err != nil {
+		c.adapter.Log.Warn("yuanxin: extract context usage data failed", "err", err, "session_id", env.SessionID)
 		return nil
 	}
 

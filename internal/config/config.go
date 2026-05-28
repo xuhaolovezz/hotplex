@@ -1199,6 +1199,7 @@ func (c *Config) normalizePaths() {
 		&c.Messaging.Slack.MossModelDir,
 		&c.Messaging.Feishu.WorkDir,
 		&c.Messaging.Feishu.MossModelDir,
+		&c.Messaging.Yuanxin.WorkDir,
 	} {
 		if *pf != "" {
 			absPath, err := ExpandAndAbs(*pf)
@@ -1380,6 +1381,29 @@ func applyMessagingEnv(cfg *Config) {
 			{"HOTPLEX_MESSAGING_FEISHU_ALLOW_FROM", "AllowFrom"},
 			{"HOTPLEX_MESSAGING_FEISHU_ALLOW_DM_FROM", "AllowDMFrom"},
 			{"HOTPLEX_MESSAGING_FEISHU_ALLOW_GROUP_FROM", "AllowGroupFrom"},
+		},
+	)
+
+	// Yuanxin
+	applyPlatformEnv(&cfg.Messaging.Yuanxin,
+		[]envMapping{
+			{"HOTPLEX_MESSAGING_YUANXIN_APP_ID", "AppID"},
+			{"HOTPLEX_MESSAGING_YUANXIN_PULSAR_URL", "PulsarURL"},
+			{"HOTPLEX_MESSAGING_YUANXIN_TENANT", "Tenant"},
+			{"HOTPLEX_MESSAGING_YUANXIN_NAMESPACE", "Namespace"},
+			{"HOTPLEX_MESSAGING_YUANXIN_PRODUCER_TOPIC", "ProducerTopic"},
+			{"HOTPLEX_MESSAGING_YUANXIN_WORKER_TYPE", "WorkerType"},
+			{"HOTPLEX_MESSAGING_YUANXIN_WORK_DIR", "WorkDir"},
+			{"HOTPLEX_MESSAGING_YUANXIN_DM_POLICY", "DMPolicy"},
+			{"HOTPLEX_MESSAGING_YUANXIN_GROUP_POLICY", "GroupPolicy"},
+		},
+		[]envMapping{
+			{"HOTPLEX_MESSAGING_YUANXIN_ENABLED", "Enabled"},
+		},
+		[]envMapping{
+			{"HOTPLEX_MESSAGING_YUANXIN_ALLOW_FROM", "AllowFrom"},
+			{"HOTPLEX_MESSAGING_YUANXIN_ALLOW_DM_FROM", "AllowDMFrom"},
+			{"HOTPLEX_MESSAGING_YUANXIN_ALLOW_GROUP_FROM", "AllowGroupFrom"},
 		},
 	)
 
