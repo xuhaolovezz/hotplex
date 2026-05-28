@@ -39,15 +39,17 @@ func TestAdapter_ConfigureWith(t *testing.T) {
 		wantTenant string
 		wantNS     string
 		wantTopic  string
+		wantErr    bool
 	}{
 		{
-			name:       "all defaults",
+			name:       "missing app_id",
 			extras:     map[string]any{},
 			wantAppID:  "",
 			wantURL:    "pulsar://localhost:6650",
 			wantTenant: "public",
 			wantNS:     "default",
 			wantTopic:  "global-open-claw-response-topic",
+			wantErr:    true,
 		},
 		{
 			name: "custom values",
@@ -67,8 +69,10 @@ func TestAdapter_ConfigureWith(t *testing.T) {
 		{
 			name: "full topic URL passthrough",
 			extras: map[string]any{
+				"app_id":         "app-123",
 				"producer_topic": "persistent://tenant/ns/topic",
 			},
+			wantAppID:  "app-123",
 			wantURL:    "pulsar://localhost:6650",
 			wantTenant: "public",
 			wantNS:     "default",
@@ -81,6 +85,11 @@ func TestAdapter_ConfigureWith(t *testing.T) {
 			t.Parallel()
 			a := &Adapter{}
 			err := a.ConfigureWith(messaging.AdapterConfig{Extras: tt.extras})
+			if tt.wantErr {
+				require.Error(t, err)
+				require.Contains(t, err.Error(), "app_id is required")
+				return
+			}
 			require.NoError(t, err)
 			require.Equal(t, tt.wantAppID, a.appID)
 			require.Equal(t, tt.wantURL, a.pulsarURL)
@@ -225,8 +234,6 @@ func TestYuanxinConn_WriteCtx_EventTypes(t *testing.T) {
 					Data: events.MessageDeltaData{Content: "hello"},
 				},
 			},
-			wantErr: true,
-			errMsg:  "producer not initialized",
 		},
 		{
 			name: "message.delta with empty content",
