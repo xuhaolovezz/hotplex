@@ -221,25 +221,28 @@ func TestCollector_TimerFlush(t *testing.T) {
 	}
 
 	store := newTestStore(t)
-	c := NewCollector(store, slog.Default())
+	c := NewCollectorWithIntervals(store, slog.Default(), 50*time.Millisecond, 100*time.Millisecond)
 	defer func() { _ = c.Close() }()
 
 	// Accumulate small content (< 4096) so size trigger won't fire
 	c.CaptureDeltaString("s1", 1, "chunk1")
 	c.CaptureDeltaString("s1", 2, "chunk2")
 
-	// Wait for timer trigger (deltaFlushInterval = 2s + ticker margin)
-	time.Sleep(deltaFlushInterval + 200*time.Millisecond)
-
-	// Verify Message was written by timer flush (without Close)
-	page, err := store.QueryBySession(context.Background(), "s1", 0, CursorLatest, 100)
-	require.NoError(t, err)
-	require.Len(t, page.Events, 1)
-	require.Equal(t, string(events.Message), page.Events[0].Type)
-
-	var data map[string]any
-	require.NoError(t, json.Unmarshal(page.Events[0].Data, &data))
-	require.Equal(t, "chunk1chunk2", data["content"])
+	// Wait for timer trigger (deltaFlush + ticker margin)
+	require.Eventually(t, func() bool {
+		page, err := store.QueryBySession(context.Background(), "s1", 0, CursorLatest, 100)
+		if err != nil || len(page.Events) != 1 {
+			return false
+		}
+		if page.Events[0].Type != string(events.Message) {
+			return false
+		}
+		var data map[string]any
+		if err := json.Unmarshal(page.Events[0].Data, &data); err != nil {
+			return false
+		}
+		return data["content"] == "chunk1chunk2"
+	}, 500*time.Millisecond, 50*time.Millisecond, "expected flushed message event")
 }
 
 func TestCollector_ResetSessionEmptyFlush(t *testing.T) {
@@ -373,22 +376,26 @@ func TestCollector_ReasoningTimerFlush(t *testing.T) {
 	}
 
 	store := newTestStore(t)
-	c := NewCollector(store, slog.Default())
+	c := NewCollectorWithIntervals(store, slog.Default(), 50*time.Millisecond, 100*time.Millisecond)
 	defer func() { _ = c.Close() }()
 
 	c.CaptureReasoningString("s1", 1, "think1")
 	c.CaptureReasoningString("s1", 2, "think2")
 
-	time.Sleep(deltaFlushInterval + 200*time.Millisecond)
-
-	page, err := store.QueryBySession(context.Background(), "s1", 0, CursorLatest, 100)
-	require.NoError(t, err)
-	require.Len(t, page.Events, 1)
-	require.Equal(t, string(events.Reasoning), page.Events[0].Type)
-
-	var data map[string]any
-	require.NoError(t, json.Unmarshal(page.Events[0].Data, &data))
-	require.Equal(t, "think1think2", data["content"])
+	require.Eventually(t, func() bool {
+		page, err := store.QueryBySession(context.Background(), "s1", 0, CursorLatest, 100)
+		if err != nil || len(page.Events) != 1 {
+			return false
+		}
+		if page.Events[0].Type != string(events.Reasoning) {
+			return false
+		}
+		var data map[string]any
+		if err := json.Unmarshal(page.Events[0].Data, &data); err != nil {
+			return false
+		}
+		return data["content"] == "think1think2"
+	}, 500*time.Millisecond, 50*time.Millisecond, "expected flushed reasoning event")
 }
 
 func TestCollector_CaptureReasoningViaCapture(t *testing.T) {

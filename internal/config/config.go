@@ -68,8 +68,14 @@ func (c *Config) Validate() []string {
 	if c.Gateway.Addr == "" {
 		errs = append(errs, "gateway.addr is required (or use default :8080)")
 	}
-	if c.DB.Path == "" {
-		errs = append(errs, "db.path is required (or use default hotplex.db)")
+	if c.DB.Driver == "" || c.DB.Driver == "sqlite" {
+		if c.DB.Path == "" && c.DB.SQLite.Path == "" {
+			errs = append(errs, "db.path or db.sqlite.path is required (or use default hotplex.db)")
+		}
+	} else if strings.EqualFold(c.DB.Driver, "postgres") || strings.EqualFold(c.DB.Driver, "pg") || strings.EqualFold(c.DB.Driver, "postgresql") {
+		if c.DB.Postgres.ConnStr == "" {
+			errs = append(errs, "db.postgres.dsn is required when db.driver is postgres")
+		}
 	}
 	if c.Session.RetentionPeriod <= 0 {
 		errs = append(errs, "session.retention_period must be positive")
@@ -386,8 +392,23 @@ type GatewayConfig struct {
 	DeltaCoalesceSize int `mapstructure:"delta_coalesce_size"`
 }
 
-// DBConfig holds SQLite settings shared by all database connections.
+// DBConfig holds database settings.
+// Supports both SQLite and PostgreSQL backends.
+// For backward compatibility, legacy flat fields (Path, WALMode, etc.) are kept
+// on DBConfig. New code should prefer the structured SQLite.* or Postgres.* fields.
 type DBConfig struct {
+	// Driver specifies the database driver: "sqlite" (default) or "postgres".
+	// When set to "postgres", the Postgres sub-config is used instead of SQLite.
+	Driver string `mapstructure:"driver"`
+
+	// SQLite-specific configuration. Also the target for legacy flat fields
+	// when using the sqlite driver (default).
+	SQLite SQLiteConfig `mapstructure:"sqlite"`
+
+	// Postgres-specific configuration. Active when Driver is "postgres".
+	Postgres PostgresConfig `mapstructure:"postgres"`
+
+	// ── Legacy flat fields (deprecated, use SQLite.* instead) ──
 	Path              string        `mapstructure:"path"`
 	EventsPath        string        `mapstructure:"events_path"` // Deprecated: events table now lives in hotplex.db (same as Path)
 	WALMode           bool          `mapstructure:"wal_mode"`
@@ -397,6 +418,109 @@ type DBConfig struct {
 	CacheSizeKiB      int           `mapstructure:"cache_size_kib"`
 	MmapSizeMiB       int           `mapstructure:"mmap_size_mib"`
 	WalAutoCheckpoint int           `mapstructure:"wal_autocheckpoint"`
+}
+
+// DSN returns the connection string for the configured database driver.
+// Delegates to the active sub-config's DSN method based on Driver.
+func (d DBConfig) DSN() string {
+	switch strings.ToLower(d.Driver) {
+	case "postgres", "pg", "postgresql":
+		return d.Postgres.DSN()
+	default:
+		return d.SQLite.DSN()
+	}
+}
+
+// EffectiveSQLitePath returns the effective SQLite database path,
+// preferring the structured SQLite.Path with legacy flat Path as fallback.
+func (d DBConfig) EffectiveSQLitePath() string {
+	if d.SQLite.Path != "" {
+		return d.SQLite.Path
+	}
+	return d.Path
+}
+
+// EffectiveMaxOpenConns returns the effective max open connections,
+// preferring the structured SQLite.MaxOpenConns with legacy flat MaxOpenConns as fallback.
+func (d DBConfig) EffectiveMaxOpenConns() int {
+	if d.SQLite.MaxOpenConns > 0 {
+		return d.SQLite.MaxOpenConns
+	}
+	return d.MaxOpenConns
+}
+
+// EffectiveWALMode returns the effective WAL mode setting.
+// Note: explicitly setting WALMode=false (zero value) falls through to the legacy field.
+// This is acceptable because WALMode=false is not a meaningful config — users who want
+// to disable WAL should omit the field and set the legacy wal_mode: false instead.
+func (d DBConfig) EffectiveWALMode() bool {
+	if d.SQLite.WALMode {
+		return true
+	}
+	return d.WALMode
+}
+
+// EffectiveBusyTimeout returns the effective busy timeout for SQLite.
+func (d DBConfig) EffectiveBusyTimeout() time.Duration {
+	if d.SQLite.BusyTimeout > 0 {
+		return d.SQLite.BusyTimeout
+	}
+	return d.BusyTimeout
+}
+
+// EffectiveCacheSizeKiB returns the effective SQLite cache size in KiB.
+func (d DBConfig) EffectiveCacheSizeKiB() int {
+	if d.SQLite.CacheSizeKiB > 0 {
+		return d.SQLite.CacheSizeKiB
+	}
+	return d.CacheSizeKiB
+}
+
+// EffectiveMmapSizeMiB returns the effective SQLite mmap size in MiB.
+func (d DBConfig) EffectiveMmapSizeMiB() int {
+	if d.SQLite.MmapSizeMiB > 0 {
+		return d.SQLite.MmapSizeMiB
+	}
+	return d.MmapSizeMiB
+}
+
+// EffectiveWalAutoCheckpoint returns the effective WAL auto-checkpoint threshold.
+func (d DBConfig) EffectiveWalAutoCheckpoint() int {
+	if d.SQLite.WalAutoCheckpoint > 0 {
+		return d.SQLite.WalAutoCheckpoint
+	}
+	return d.WalAutoCheckpoint
+}
+
+// SQLiteConfig holds SQLite-specific database settings.
+type SQLiteConfig struct {
+	Path              string        `mapstructure:"path"`
+	WALMode           bool          `mapstructure:"wal_mode"`
+	BusyTimeout       time.Duration `mapstructure:"busy_timeout"`
+	MaxOpenConns      int           `mapstructure:"max_open_conns"`
+	VacuumThreshold   float64       `mapstructure:"vacuum_threshold"`
+	CacheSizeKiB      int           `mapstructure:"cache_size_kib"`
+	MmapSizeMiB       int           `mapstructure:"mmap_size_mib"`
+	WalAutoCheckpoint int           `mapstructure:"wal_autocheckpoint"`
+}
+
+// DSN returns the SQLite database path. Defaults to ":memory:" when empty.
+func (s SQLiteConfig) DSN() string {
+	if s.Path == "" {
+		return ":memory:"
+	}
+	return s.Path
+}
+
+// PostgresConfig holds PostgreSQL-specific database settings.
+type PostgresConfig struct {
+	ConnStr      string `mapstructure:"dsn"`
+	MaxOpenConns int    `mapstructure:"max_open_conns"`
+}
+
+// DSN returns the PostgreSQL connection string. Returns empty when ConnStr is not configured.
+func (p PostgresConfig) DSN() string {
+	return p.ConnStr
 }
 
 // WorkerConfig holds per-worker defaults.
@@ -451,6 +575,7 @@ type CodexCLIConfig struct {
 	Ephemeral       bool          `mapstructure:"ephemeral"`         // ephemeral sessions, default true
 	Personality     string        `mapstructure:"personality"`       // agent personality for app-server mode, default "friendly"
 	StartupTimeout  time.Duration `mapstructure:"startup_timeout"`   // process startup timeout, default 30s
+	CallTimeout     time.Duration `mapstructure:"call_timeout"`      // JSON-RPC call timeout, default 30s
 	UseAppServer    bool          `mapstructure:"use_app_server"`    // use persistent app-server mode instead of one-shot exec
 	IdleDrainPeriod time.Duration `mapstructure:"idle_drain_period"` // idle drain timeout for app-server mode, default 30m
 }
@@ -578,6 +703,18 @@ func Default() *Config {
 			DeltaCoalesceSize:     200,
 		},
 		DB: DBConfig{
+			Driver: "sqlite",
+			SQLite: SQLiteConfig{
+				Path:              filepath.Join(HotplexHome(), "data", "hotplex.db"),
+				WALMode:           true,
+				BusyTimeout:       5 * time.Second,
+				MaxOpenConns:      3, // 1 writer + 2 readers for shared session/event store
+				VacuumThreshold:   0.2,
+				CacheSizeKiB:      8192,
+				MmapSizeMiB:       64,
+				WalAutoCheckpoint: 2000,
+			},
+			// Legacy flat fields (kept for backward compat with existing consumers).
 			Path:              filepath.Join(HotplexHome(), "data", "hotplex.db"),
 			EventsPath:        "", // Deprecated: unused, events table lives in hotplex.db
 			WALMode:           true,
@@ -614,6 +751,7 @@ func Default() *Config {
 				Ephemeral:       true,
 				Personality:     "friendly",
 				StartupTimeout:  30 * time.Second,
+				CallTimeout:     30 * time.Second,
 				UseAppServer:    true,
 				IdleDrainPeriod: 30 * time.Minute,
 			},
@@ -833,6 +971,9 @@ func Load(filePath string) (*Config, error) {
 	_ = v.BindEnv("log.format")
 	_ = v.BindEnv("db.path")
 	_ = v.BindEnv("db.wal_mode")
+	_ = v.BindEnv("db.driver")
+	_ = v.BindEnv("db.postgres.dsn")
+	_ = v.BindEnv("db.postgres.max_open_conns")
 	_ = v.BindEnv("gateway.addr")
 	_ = v.BindEnv("admin.enabled")
 	_ = v.BindEnv("admin.addr")
@@ -1048,6 +1189,7 @@ func (c *Config) normalizePaths() {
 
 	// 2. Expand ~ and normalize paths.
 	for _, pf := range []*string{
+		&c.DB.SQLite.Path,
 		&c.DB.Path,
 		&c.DB.EventsPath,
 		&c.Worker.DefaultWorkDir,

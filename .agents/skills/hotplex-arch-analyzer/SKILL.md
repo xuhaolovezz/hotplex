@@ -1,6 +1,6 @@
 ---
 name: hotplex-arch-analyzer
-description: HotPlex 项目架构、代码健康和性能优化深度审计 — **立即调用此 skill 进行**：架构分析、代码质量审查、SOLID/DRY 合规检查、并发安全审计、**性能优化识别**（热路径分配、锁竞争、sync.Pool、JSON 编码开销）、安全扫描、非功能分析、代码健康度改进、模块质量评估、存量 issue 审计与清理。**专为 HotPlex Gateway 多层架构优化**（WebSocket/Session/Worker/Messaging），内建 HotPlex 热路径性能模式库（WritePump、Hub 广播、Streaming Card、Worker stdio、Event Store），自动创建/验证 GitHub Issue。增量式模块分析 + 存量 issue 审计 + 跨会话进度追踪 + 优先级排序 = **最有效的 /loop 循环执行工具**，适用于大型 Go 代码库的系统性审计。**当提到**：性能分析、性能优化、瓶颈定位、延迟优化、内存分配、锁竞争、pprof、benchmark、热路径优化、吞吐量提升 — 即使没有明确说"架构分析"也应使用此 skill。
+description: HotPlex 架构深度审计 — 架构分析、SOLID/DRY 合规、并发安全、性能优化、安全扫描、存量 issue 审计与清理。自动创建 GitHub Issue，支持 /loop 循环执行。当提到架构分析、代码质量、性能优化、瓶颈定位、锁竞争、热路径优化时使用。
 ---
 
 # 架构深度分析器
@@ -15,6 +15,7 @@ description: HotPlex 项目架构、代码健康和性能优化深度审计 — 
 **存量 Issue 审计** — 当 open issues 超过阈值时，自动切换为审计模式：核实、关闭、更正
 **持久化进度** — 跨会话追踪，支持 `/loop` 连续执行，不会丢失工作
 **HotPlex 专用优化** — 针对 Gateway 多层架构的特殊模式定制
+**Subagent 上下文隔离** — 深度分析在独立 subagent 中执行，主会话只处理 JSON 结果，每模块上下文消耗降低 97%
 
 **核心设计**：每次调用 = **一个分析周期**在**一个模块**上覆盖**2-3 个方面**。专为 `/loop` 设计 — 重复调用在 4 个深度阶段中渐进覆盖所有模块 × 所有方面。
 
@@ -65,12 +66,12 @@ description: HotPlex 项目架构、代码健康和性能优化深度审计 — 
 
 **分析模式**（默认）：
 ```
-加载进度 → 选择模块 → 选择方面 → 深度分析 → 分诊 → 去重检查 → 创建/更新 Issue → 更新进度 → 报告
+加载进度 → 选择模块 → 选择方面 → [Subagent 深度分析+分诊] → 去重检查 → 创建/更新 Issue → 更新进度 → 报告
 ```
 
 **审计模式**（open issues ≥ 阈值时激活）：
 ```
-加载进度 → 选择 Issue → 验证代码 → 分类处理 → 更新进度 → 报告
+加载进度 → 选择 Issue → [Subagent 验证代码] → 分类处理 → 更新进度 → 报告
 ```
 
 **为什么需要双模式**：分析模式持续发现新问题，但问题积累后会降低团队信任度和审查效率。审计模式定期清理存量 issue，关闭误报、更正偏差，保持 issue backlog 的健康。两个模式交替运行，既不停止分析，也不让 issue 失控。
@@ -124,98 +125,126 @@ echo "Open architecture issues: $OPEN_COUNT"
 - 以此类推
 - 如果所有方面都覆盖 → 重新分析最旧的阶段以获取更深入的见解（增量深度）
 
-### 步骤 4：深度分析
+### 步骤 4：深度分析（Subagent 隔离执行）
 
-对于每个选定的方面，**读取目标模块中的所有源文件**（包括 `_test.go`）。
+**为什么使用 Subagent**：直接在主会话中读取所有源文件会导致上下文快速膨胀 — 一个模块 ~7000 行源码消耗 ~20000 tokens。`/loop` 模式下分析 10+ 模块后主会话即因上下文耗尽被压缩。通过将文件读取和分析委托给 subagent，主会话只接收结构化的 JSON 结果（~500 tokens），将每模块上下文消耗降低 97%。
 
-**为什么读取所有文件**：架构问题往往跨文件显现 — 只看单个文件会遗漏耦合模式、重复逻辑、或不一致的错误处理。
+**上下文隔离原则**：
+- **Subagent 内部**：读取源文件、分析清单、生成分诊结果 — 上下文膨胀在 subagent 内部消化
+- **主会话**：只接收 JSON 结果 → 去重检查 → 创建 issue → 更新进度 → 报告
+- **审计模式同理**：代码验证委托给 subagent，主会话只处理判定结果
 
-分析特定方面时，读取 `references/analysis-checklist.md` 中的相应部分，以获取要检查的内容的详细清单。清单提供了要验证的具体项目 — 将其用作指南，而非强制性逐项清单。
+#### Subagent 调用方式
 
-**分析产出标准**：每个发现必须包含四个要素：
-- **什么**：具体问题描述
-- **哪里**：`file.go:line_range` 引用（通常 2-3 个文件位置提供充分上下文）
-- **为什么**：影响/风险量化（例如："影响 N 个调用点"，"每个请求持有锁约 ~200ms"）
-- **如何**：重构方向 + **代码片段**显示 before/after 模式
+使用 `Agent` 工具委托深度分析，subagent_type 使用 `general-purpose`：
 
-**为什么需要代码片段**：没有代码示例的发现难以理解和实施。片段让问题立即可操作，无需审查者重新阅读源代码。
-
-#### 代码片段指南
-
-每个发现必须包含一个最小的代码示例，演示问题和修复方向。这使得问题可立即操作，无需重新阅读源代码。
-
-**好的片段** — 显示问题模式和提议的替代方案：
-```go
-// 当前：静默错误丢失
-if err != nil {
-    log.Error("failed", "err", err)
-    return nil  // 调用者不知道这失败了
-}
-
-// 提议：带上下文传播
-if err != nil {
-    return fmt.Errorf("handleMessage: %w", err)
-}
+```
+Agent({
+  description: "arch: <module_short> <aspects>",
+  subagent_type: "general-purpose",
+  prompt: <将下方模板中占位符替换为实际值>
+})
 ```
 
-**太冗长** — 不要粘贴整个函数。提取重要的 5-15 行模式。
-**太模糊** — 不要写"重构使用接口"而不显示接口签名。
+#### Subagent Prompt 模板
 
-对于结构/设计发现（SOLID、DRY），显示提议的接口或类型分解：
-```go
-// 提议的提取
-type MessagePipeline interface {
-    Parse(ctx context.Context, raw any) (*ParsedMessage, error)
-    Filter(ctx context.Context, msg *ParsedMessage) (bool, error)
-    Route(ctx context.Context, msg *ParsedMessage) error
+将以下模板中的 `<PLACEHOLDER>` 替换为实际值后作为 prompt 传递。模板是自包含的 — subagent 无需主会话上下文。
+
+```
+你是 HotPlex 项目的 Go 架构分析代理。分析模块 `<MODULE_PATH>` 的以下方面：<ASPECTS_LIST>。
+
+项目根目录：<PROJECT_ROOT>（当前工作目录）
+
+## 分析步骤
+
+1. 列出并读取 `<MODULE_PATH>/` 下所有 .go 源文件（含 _test.go）。用 Glob 列出文件，用 Read 读取内容。
+2. 读取分析清单：`<PROJECT_ROOT>/.claude/skills/hotplex-arch-analyzer/references/analysis-checklist.md`，关注 <ASPECTS_LIST> 相关的部分。
+3. 如果分析方面包含 performance(7) 或 scalability(8)，还需读取 `<PROJECT_ROOT>/.claude/skills/hotplex-arch-analyzer/references/performance-patterns.md`。
+4. 对每个方面逐一分析，记录发现。
+
+## 发现标准
+
+每个发现必须包含四要素：
+- **What**: 具体问题描述（1-2 句）
+- **Where**: `file.go:line_range` 引用（2-3 个文件位置提供上下文）
+- **Why**: 影响/风险量化（如"影响 N 个调用点"、"每个请求持有锁 ~200ms"）
+- **How**: 重构方向 + 代码片段（5-15 行，显示 before/after 模式）
+
+代码片段规则：
+- 好的片段：5-15 行显示问题模式和提议的替代方案
+- 不要粘贴整个函数，提取关键模式
+- 不要写"重构使用接口"而不显示接口签名
+
+严重性级别：Critical（数据丢失/安全/死锁）> High（可靠性/性能）> Medium（可维护性/DRY）> Low（风格/命名/次要）
+
+## 分诊
+
+分析完成后对每个发现进行分诊，**只保留通过两个过滤器的发现**：
+
+**置信度过滤器**：
+- High（多个代码引用确认，模式明确）→ 保留
+- Medium（单实例但模式清晰，已知反模式）→ 保留
+- Low（推测性，可能是有意设计，证据不足）→ **丢弃**
+
+**ROI 过滤器**：
+- High（小投入大影响，快速获胜）→ 保留
+- Medium（中等投入明确影响，重构模式）→ 保留
+- Low（大投入边际影响，过早抽象）→ **丢弃**（除非 Critical/High 严重性）
+
+## 输出格式
+
+在回复末尾，用以下格式返回结果（用 ```json 和 ``` 包裹）：
+
+{
+  "module": "<MODULE_PATH>",
+  "aspects_analyzed": ["aspect1", "aspect2"],
+  "findings": [
+    {
+      "name": "short-kebab-case-name",
+      "severity": "Critical|High|Medium|Low",
+      "confidence": "High|Medium",
+      "roi": "High|Medium",
+      "aspect": "aspect-name",
+      "location": ["file.go:10-25", "file2.go:100-115"],
+      "what": "具体问题描述",
+      "why": "影响/风险量化",
+      "current_pattern": "显示问题的 5-15 行代码片段",
+      "proposed_fix": "显示解决方案的 5-15 行代码片段"
+    }
+  ],
+  "dropped": [
+    {"finding": "name-or-brief-description", "reason": "Low confidence: ... 或 Low ROI: ..."}
+  ],
+  "summary": "1-2 句模块健康评估"
 }
+
+重要：
+- 只返回 High/Medium 置信度 AND High/Medium ROI 的发现
+- 丢弃的发现记录在 dropped 数组中，附简要原因
+- 如果没有可操作发现，返回空 findings 数组，summary 说明原因
+- 不要编造发现。如果代码质量良好，明确说明
 ```
 
-**严重性级别**：Critical（数据丢失 / 安全 / 死锁）> High（可靠性 / 性能）> Medium（可维护性 / DRY）> Low（风格 / 命名 / 次要）
+#### Subagent Prompt 参数替换规则
 
-如果方面没有产生真正的发现，则跳过 — 不要制造问题。
+| 占位符 | 替换为 |
+|--------|--------|
+| `<MODULE_PATH>` | 目标模块路径，如 `internal/gateway` |
+| `<ASPECTS_LIST>` | 方面名称列表，如 `SOLID, DRY` |
+| `<PROJECT_ROOT>` | 当前工作目录绝对路径 |
 
-### 步骤 4.5：发现分诊（置信度 + ROI）
+#### 处理 Subagent 返回结果
 
-**为什么分诊很重要**：未经分诊的分析会产生大量误报和低价值发现，浪费审查时间并降低对架构分析的信任。通过评估置信度和 ROI，只创建真正重要的问题。
+Subagent 返回后：
 
-在创建 issue 之前，通过两个过滤器对每个发现进行分诊：
+1. **提取 JSON**：从返回文本末尾找到 ` ```json ` 包裹的块
+2. **验证结构**：确认 findings 数组中每个发现包含四要素 + severity/confidence/roi
+3. **传递给后续步骤**：
+   - `findings` → 步骤 4.8（去重检查）
+   - `dropped` → 步骤 6（进度更新）
+   - `summary` → 步骤 7（报告）
 
-#### 置信度评估
-
-评估您对这是真正问题而非误报的确定性程度：
-
-| 级别 | 标准 | 行动 |
-|-------|----------|------|
-| **高** | 多个代码引用确认问题；模式明确；可用具体示例轻松演示 | **创建 issue** |
-| **中** | 单个实例但模式清晰；匹配众所周知的反模式；中等代码证据 | **创建 issue**（在 issue 中注明置信度） |
-| **低** | 推测性；可能是有意的设计；代码证据不足；需要更深入的调查以确认 | **丢弃**（在进度中记为"观察到但不可操作"） |
-
-**为什么丢弃低置信度发现**：它们浪费审查者时间，并降低对架构分析过程的信任。在进度中记录它们以便后续重新分析时重新评估。
-
-#### ROI 评估
-
-评估修复每个发现的投入产出比 — 这决定是否值得花费工程时间：
-
-| 维度 | 问题要问 |
-|-----------|-----------------|
-| **修复投入** | 要更改的代码行？回归风险？是否需要架构更改？ |
-| **修复后影响** | 它会解锁其他改进吗？减少 bug 表面积吗？提高可测试性吗？ |
-| **延迟影响** | 它会进一步衰减吗？阻止其他工作吗？导致生产问题吗？ |
-
-**ROI 分类和行动**：
-- **高 ROI** → 小投入，大影响（快速获胜，解锁改进）→ **总是创建 issue**
-- **中 ROI** → 中等投入，明确影响（重构模式，减少重复）→ **创建 issue**
-- **低 ROI** → 大投入，边际影响（风格问题，过早抽象）→ **丢弃**，除非是 Critical/High 严重性
-
-**为什么 ROI 比严重性更重要**：一个 Low 严重性但高 ROI 的问题（如简单的 DRY 重构）比 High 严重性但低 ROI 的问题（如需要重写的大型重构）更值得优先处理。
-
-#### 分诊输出
-
-分诊后，将发现组织到 issue 中：
-- 以**高置信度 + 高 ROI**发现开头（最具影响力）
-- 然后是**中置信度或中 ROI**发现
-- 省略低置信度或低 ROI 发现（在进度文件中注明）
+如果 subagent 未能返回有效 JSON，从返回文本中手动提取关键发现并继续。
 
 ### 步骤 4.8：Issue 去重与合并检查
 
@@ -379,11 +408,67 @@ for i in issues:
 
 当步骤 1.5 决定进入审计模式时，执行 5 步审计流程替代分析模式（步骤 2-7）。
 
-**审计流程概览**：选择审计目标 → 逐个验证代码现状 → 判定处理（fixed/invalid/outdated/valid/duplicate）→ 更新进度 → 审计报告。
+**审计流程概览**：选择审计目标 → [Subagent 验证代码] → 判定处理（fixed/invalid/outdated/valid/duplicate）→ 更新进度 → 审计报告。
 
 **每次审计 3-5 个 issue**，优先从未审计过的最旧 issue 开始，同模块 issue 放在一起审计。
 
 完整审计步骤（含 bash 命令、判定表、处理操作、进度更新、报告格式）见 `references/audit-mode.md`。
+
+### 审计模式 Subagent 委托
+
+代码验证步骤委托给 subagent 执行，避免在主会话中读取大量源文件。
+
+#### 审计 Subagent Prompt 模板
+
+```
+你是 HotPlex 项目的架构审计代理。验证以下 GitHub Issue 是否仍然有效。
+
+项目根目录：<PROJECT_ROOT>（当前工作目录）
+
+## 待审计 Issue
+
+Issue 编号: <ISSUE_NUMBER>
+标题: <ISSUE_TITLE>
+内容摘要: <ISSUE_BODY_SUMMARY>
+
+## 验证步骤
+
+1. 读取 Issue 中引用的所有代码文件和行号
+2. 检查每个发现点的当前代码状态：
+   - 文件是否存在？
+   - 引用的行号处的代码是否仍匹配 Issue 描述的问题模式？
+   - 问题是否已被后续提交修复？
+3. 如果 Issue 引用了多个发现，逐一验证每个发现
+
+## 判定标准
+
+- **valid**: 代码仍存在描述的问题，Issue 完全有效
+- **partial**: 部分发现已修复，但核心问题仍存在
+- **fixed**: 所有发现已被修复（指出修复的 commit 或 PR 如果能从代码看出）
+- **invalid**: 问题从未存在或 Issue 描述不准确
+- **outdated**: 代码已重构，相关文件/函数已不存在或完全改写
+- **duplicate**: 与另一个 Issue 描述相同问题
+
+## 输出格式
+
+在回复末尾，用以下格式返回结果（用 ```json 和 ``` 包裹）：
+
+{
+  "issue_number": <ISSUE_NUMBER>,
+  "verdict": "valid|partial|fixed|invalid|outdated|duplicate",
+  "findings_status": [
+    {
+      "finding_name": "name",
+      "status": "valid|fixed|invalid|outdated",
+      "file": "path/to/file.go",
+      "lines": "10-25",
+      "evidence": "当前代码中观察到的证据，1-2 句"
+    }
+  ],
+  "recommendation": "建议操作：close / keep-open / update-body / add-comment",
+  "comment_body": "如果建议 add-comment 或 update-body，提供建议内容（可选）"
+}
+```
 
 ---
 

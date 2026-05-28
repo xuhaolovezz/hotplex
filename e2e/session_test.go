@@ -167,7 +167,7 @@ func TestE2E_ResumeSession(t *testing.T) {
 
 			err = c1.SendInput(context.Background(), "first message")
 			require.NoError(t, err)
-			_ = collectEvents(t, c1.Events(), 5*time.Second)
+			_ = collectEvents(t, c1.Events(), 500*time.Millisecond)
 
 			// Close first connection — session goes to IDLE.
 			require.NoError(t, c1.Close())
@@ -212,7 +212,7 @@ func TestE2E_CloseGracefully(t *testing.T) {
 
 	select {
 	case <-done:
-	case <-time.After(5 * time.Second):
+	case <-time.After(time.Second):
 		t.Fatal("Close() blocked for too long")
 	}
 }

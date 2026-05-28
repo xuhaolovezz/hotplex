@@ -3,14 +3,16 @@ package admin
 import (
 	"context"
 	"crypto/rand"
-	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"strconv"
+	"sync"
 	"time"
+
+	"github.com/hrygo/hotplex/internal/sqlutil"
 )
 
 // maskAPIKey returns a masked version showing only first 8 and last 4 chars.
@@ -31,9 +33,24 @@ type APIKeyUser struct {
 	UpdatedAt   string `json:"updated_at,omitempty"`
 }
 
+// apiKeyUserStore implements APIKeyUserStorer backed by SQLite.
+// PG-backed callers use pgStore (apikey_pg_store.go) instead.
 type apiKeyUserStore struct {
-	db          *sql.DB
+	db          DBExecutor
+	mu          sync.Mutex
 	invalidator cacheInvalidator
+	writeMu     *sqlutil.WriteMu // serializes writes for SQLite; nil/PG-safe
+}
+
+// APIKeyUserStorer defines CRUD operations for API key user records.
+type APIKeyUserStorer interface {
+	list(ctx context.Context) ([]APIKeyUser, error)
+	get(ctx context.Context, id int64) (*APIKeyUser, error)
+	create(ctx context.Context, u *APIKeyUser) error
+	update(ctx context.Context, id int64, u *APIKeyUser) error
+	delete(ctx context.Context, id int64) error
+	Invalidator() cacheInvalidator
+	SetInvalidator(cacheInvalidator)
 }
 
 // cacheInvalidator clears cached resolver entries after CUD operations.
@@ -41,11 +58,32 @@ type cacheInvalidator interface {
 	Invalidate(key string)
 }
 
-func newAPIKeyUserStoreWithInvalidator(db *sql.DB, inv cacheInvalidator) *apiKeyUserStore {
+// KeyValidator syncs database-sourced API keys into the authentication layer.
+// Implemented by security.Authenticator; injected via Deps.
+type KeyValidator interface {
+	AddKey(key string)
+	RemoveKey(key string)
+}
+
+func newAPIKeyUserStoreWithInvalidator(db DBExecutor, inv cacheInvalidator, writeMu *sqlutil.WriteMu) APIKeyUserStorer {
 	if db == nil {
 		return nil
 	}
-	return &apiKeyUserStore{db: db, invalidator: inv}
+	return &apiKeyUserStore{db: db, invalidator: inv, writeMu: writeMu}
+}
+
+var _ APIKeyUserStorer = (*apiKeyUserStore)(nil)
+
+func (s *apiKeyUserStore) Invalidator() cacheInvalidator {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.invalidator
+}
+
+func (s *apiKeyUserStore) SetInvalidator(inv cacheInvalidator) {
+	s.mu.Lock()
+	s.invalidator = inv
+	s.mu.Unlock()
 }
 
 func (s *apiKeyUserStore) list(ctx context.Context) ([]APIKeyUser, error) {
@@ -64,7 +102,10 @@ func (s *apiKeyUserStore) list(ctx context.Context) ([]APIKeyUser, error) {
 		}
 		result = append(result, u)
 	}
-	return result, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("admin: iterate api key users: %w", err)
+	}
+	return result, nil
 }
 
 func (s *apiKeyUserStore) get(ctx context.Context, id int64) (*APIKeyUser, error) {
@@ -73,7 +114,7 @@ func (s *apiKeyUserStore) get(ctx context.Context, id int64) (*APIKeyUser, error
 		"SELECT id, api_key, user_id, description, created_at, updated_at FROM api_key_users WHERE id = ?", id,
 	).Scan(&u.ID, &u.APIKey, &u.UserID, &u.Description, &u.CreatedAt, &u.UpdatedAt)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("admin: get api key user: %w", err)
 	}
 	return &u, nil
 }
@@ -87,42 +128,53 @@ func (s *apiKeyUserStore) create(ctx context.Context, u *APIKeyUser) error {
 		u.APIKey = "hpk_" + hex.EncodeToString(key)
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
-	res, err := s.db.ExecContext(ctx,
-		"INSERT INTO api_key_users (api_key, user_id, description, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
-		u.APIKey, u.UserID, u.Description, now, now)
-	if err != nil {
-		return fmt.Errorf("admin: create api key user: %w", err)
-	}
-	id, _ := res.LastInsertId()
-	u.ID = id
-	return nil
+	return s.writeMu.WithLock(func() error {
+		res, err := s.db.ExecContext(ctx,
+			"INSERT INTO api_key_users (api_key, user_id, description, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+			u.APIKey, u.UserID, u.Description, now, now)
+		if err != nil {
+			return fmt.Errorf("admin: create api key user: %w", err)
+		}
+		id, err := res.LastInsertId()
+		if err != nil {
+			return fmt.Errorf("admin: get inserted api key user id: %w", err)
+		}
+		u.ID = id
+		return nil
+	})
 }
 
 func (s *apiKeyUserStore) update(ctx context.Context, id int64, u *APIKeyUser) error {
 	now := time.Now().UTC().Format(time.RFC3339)
-	res, err := s.db.ExecContext(ctx,
-		"UPDATE api_key_users SET user_id = ?, description = ?, updated_at = ? WHERE id = ?",
-		u.UserID, u.Description, now, id)
-	if err != nil {
-		return fmt.Errorf("admin: update api key user: %w", err)
-	}
-	n, _ := res.RowsAffected()
-	if n == 0 {
-		return fmt.Errorf("admin: api key user ID %d not found", id)
-	}
-	return nil
+	// NOTE: api_key is immutable after creation — never add it to SET clause
+	// without also calling KeyValidator.RemoveKey(old) + AddKey(new).
+	return s.writeMu.WithLock(func() error {
+		res, err := s.db.ExecContext(ctx,
+			"UPDATE api_key_users SET user_id = ?, description = ?, updated_at = ? WHERE id = ?",
+			u.UserID, u.Description, now, id)
+		if err != nil {
+			return fmt.Errorf("admin: update api key user: %w", err)
+		}
+		n, _ := res.RowsAffected()
+		if n == 0 {
+			return fmt.Errorf("admin: api key user ID %d not found", id)
+		}
+		return nil
+	})
 }
 
 func (s *apiKeyUserStore) delete(ctx context.Context, id int64) error {
-	res, err := s.db.ExecContext(ctx, "DELETE FROM api_key_users WHERE id = ?", id)
-	if err != nil {
-		return fmt.Errorf("admin: delete api key user: %w", err)
-	}
-	n, _ := res.RowsAffected()
-	if n == 0 {
-		return fmt.Errorf("admin: api key user ID %d not found", id)
-	}
-	return nil
+	return s.writeMu.WithLock(func() error {
+		res, err := s.db.ExecContext(ctx, "DELETE FROM api_key_users WHERE id = ?", id)
+		if err != nil {
+			return fmt.Errorf("admin: delete api key user: %w", err)
+		}
+		n, _ := res.RowsAffected()
+		if n == 0 {
+			return fmt.Errorf("admin: api key user ID %d not found", id)
+		}
+		return nil
+	})
 }
 
 func (a *AdminAPI) HandleAPIKeyUserList(w http.ResponseWriter, r *http.Request) {
@@ -168,8 +220,11 @@ func (a *AdminAPI) HandleAPIKeyUserCreate(w http.ResponseWriter, r *http.Request
 		http.Error(w, "create failed", http.StatusInternalServerError)
 		return
 	}
-	if a.akStore.invalidator != nil {
-		a.akStore.invalidator.Invalidate(u.APIKey)
+	if inv := a.akStore.Invalidator(); inv != nil {
+		inv.Invalidate(u.APIKey)
+	}
+	if a.keyValidator != nil {
+		a.keyValidator.AddKey(u.APIKey)
 	}
 	w.WriteHeader(http.StatusCreated)
 	respondJSON(w, u)
@@ -232,8 +287,8 @@ func (a *AdminAPI) HandleAPIKeyUserUpdate(w http.ResponseWriter, r *http.Request
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
 	}
-	if a.akStore.invalidator != nil {
-		a.akStore.invalidator.Invalidate(oldUser.APIKey)
+	if inv := a.akStore.Invalidator(); inv != nil {
+		inv.Invalidate(oldUser.APIKey)
 	}
 	respondJSON(w, APIKeyUser{ID: id, APIKey: maskAPIKey(oldUser.APIKey), UserID: u.UserID, Description: u.Description})
 }
@@ -262,8 +317,11 @@ func (a *AdminAPI) HandleAPIKeyUserDelete(w http.ResponseWriter, r *http.Request
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
 	}
-	if a.akStore.invalidator != nil {
-		a.akStore.invalidator.Invalidate(u.APIKey)
+	if inv := a.akStore.Invalidator(); inv != nil {
+		inv.Invalidate(u.APIKey)
+	}
+	if a.keyValidator != nil {
+		a.keyValidator.RemoveKey(u.APIKey)
 	}
 	w.WriteHeader(http.StatusNoContent)
 }

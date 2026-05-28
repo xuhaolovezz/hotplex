@@ -91,6 +91,9 @@ type Collector struct {
 	closeWg  sync.WaitGroup
 	log      *slog.Logger
 
+	flushInterval time.Duration // ticker interval for batch flush (default: collectorFlushInterval)
+	deltaFlush    time.Duration // max age before flushing accumulated deltas (default: deltaFlushInterval)
+
 	accumMu        sync.Mutex
 	accum          map[string]*deltaAccumulator // sessionID → active delta accumulator
 	reasoningAccum map[string]*deltaAccumulator // sessionID → active reasoning accumulator
@@ -99,11 +102,22 @@ type Collector struct {
 
 // NewCollector creates a Collector that writes events to store.
 func NewCollector(store EventStore, log *slog.Logger) *Collector {
+	return newCollector(store, log, collectorFlushInterval, deltaFlushInterval)
+}
+
+// NewCollectorWithIntervals creates a Collector with custom flush intervals (for tests).
+func NewCollectorWithIntervals(store EventStore, log *slog.Logger, flush, deltaFlush time.Duration) *Collector {
+	return newCollector(store, log, flush, deltaFlush)
+}
+
+func newCollector(store EventStore, log *slog.Logger, flush, deltaFlush time.Duration) *Collector {
 	c := &Collector{
 		store:          store,
 		captureC:       make(chan *captureRequest, collectorChanCap),
 		closeC:         make(chan struct{}),
 		log:            log.With("component", "eventstore-collector"),
+		flushInterval:  flush,
+		deltaFlush:     deltaFlush,
 		accum:          make(map[string]*deltaAccumulator),
 		reasoningAccum: make(map[string]*deltaAccumulator),
 	}
@@ -343,7 +357,7 @@ func (c *Collector) DroppedEvents() int64 {
 func (c *Collector) runWriter() {
 	defer c.closeWg.Done()
 
-	ticker := time.NewTicker(collectorFlushInterval)
+	ticker := time.NewTicker(c.flushInterval)
 	defer ticker.Stop()
 
 	var batch []*captureRequest
@@ -399,13 +413,13 @@ func (c *Collector) flushTimedOutAccumulators(batch *[]*captureRequest) {
 	now := time.Now()
 	c.accumMu.Lock()
 	for sid, acc := range c.accum {
-		if now.Sub(acc.firstSeenAt) >= deltaFlushInterval {
+		if now.Sub(acc.firstSeenAt) >= c.deltaFlush {
 			delete(c.accum, sid)
 			*batch = append(*batch, acc.toRequest(sid))
 		}
 	}
 	for sid, acc := range c.reasoningAccum {
-		if now.Sub(acc.firstSeenAt) >= deltaFlushInterval {
+		if now.Sub(acc.firstSeenAt) >= c.deltaFlush {
 			delete(c.reasoningAccum, sid)
 			*batch = append(*batch, acc.toRequest(sid))
 		}

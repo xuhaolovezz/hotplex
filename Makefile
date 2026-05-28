@@ -21,7 +21,7 @@ GOOS         := $(shell go env GOOS)
 GOARCH       := $(shell go env GOARCH)
 GIT_SHA      := $(shell git rev-parse --short=8 HEAD 2>/dev/null || echo "unknown")
 BUILD_TIME   := $(shell date '+%Y-%m-%dT%H:%M:%S%z')
-LDFLAGS      := -s -w -X main.version=v1.18.1 -X main.buildTime=$(BUILD_TIME)
+LDFLAGS      := -s -w -X main.version=v1.19.0 -X main.buildTime=$(BUILD_TIME)
 BUILD_OPTS   := -trimpath
 
 GATEWAY_PID   := $(HOME)/.hotplex/.pids/gateway.pid
@@ -51,6 +51,7 @@ CYAN   := \033[36m
 
 .PHONY: all help quickstart hooks check-tools build build-windows build-one run
 .PHONY: dev dev-start dev-stop dev-status dev-logs dev-reset
+.PHONY: pg-start pg-stop pg-status pg-logs pg-reset dev-pg
 .PHONY: gateway-start gateway-stop gateway-status gateway-logs
 .PHONY: webchat-dev webchat-stop webchat-embed webchat-rebuild
 .PHONY: docs-build docs-clean docs-lint
@@ -222,7 +223,42 @@ dev-status:
 dev-logs:
 	@./scripts/dev.sh logs all
 
+dev-pg: pg-start
+	@$(MAKE) gateway-start HOTPLEX_DB_DRIVER=postgres HOTPLEX_DB_POSTGRES_DSN="postgres://$(PG_USER):$${POSTGRES_PASSWORD:-hotplex}@localhost:$(PG_PORT)/$(PG_DB)?sslmode=disable"
+	@$(MAKE) webchat-dev || echo "  $(YELLOW)⚠$(RESET) Webchat skipped (run 'cd webchat && pnpm install' to fix)"
+
 dev-reset: dev-stop dev-start
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PostgreSQL (dev)
+# ─────────────────────────────────────────────────────────────────────────────
+
+PG_USER ?= hotplex
+PG_DB   ?= hotplex
+PG_PORT ?= 5432
+
+pg-start:
+	@echo "$(CYAN)Starting PostgreSQL...$(RESET)"
+	@docker compose --profile postgres up -d postgres
+	@echo "  $(GREEN)✓$(RESET) PostgreSQL ready  $(DIM)pg://$(PG_USER)@localhost:$(PG_PORT)/$(PG_DB)$(RESET)"
+
+pg-stop:
+	@echo "$(CYAN)Stopping PostgreSQL...$(RESET)"
+	@docker compose --profile postgres stop postgres
+	@echo "  $(GREEN)✓$(RESET) PostgreSQL stopped"
+
+pg-status:
+	@docker compose --profile postgres ps postgres 2>/dev/null | grep -q "running" \
+		&& echo "  $(GREEN)●$(RESET) PostgreSQL running  $(DIM)localhost:$(PG_PORT)$(RESET)" \
+		|| echo "  $(RED)○$(RESET) PostgreSQL stopped"
+
+pg-logs:
+	@docker compose --profile postgres logs -f postgres
+
+pg-reset:
+	@echo "$(CYAN)Resetting PostgreSQL...$(RESET)"
+	@docker compose --profile postgres down -v
+	@$(MAKE) pg-start
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Gateway
@@ -309,6 +345,14 @@ help:
 	@printf "    $(CYAN)make %-15s$(RESET)  %s\n" "dev-stop"      "Stop all services"
 	@printf "    $(CYAN)make %-15s$(RESET)  %s\n" "gateway-stop"   "Stop gateway"
 	@printf "    $(CYAN)make %-15s$(RESET)  %s\n" "webchat-stop"  "Stop webchat"
+	@echo ""
+	@echo "  $(BOLD)🐘 PostgreSQL"
+	@printf "    $(CYAN)make %-15s$(RESET)  %s\n" "pg-start"  "Start PG container"
+	@printf "    $(CYAN)make %-15s$(RESET)  %s\n" "pg-stop"   "Stop PG container"
+	@printf "    $(CYAN)make %-15s$(RESET)  %s\n" "pg-status" "Check PG status"
+	@printf "    $(CYAN)make %-15s$(RESET)  %s\n" "pg-logs"   "View PG logs"
+	@printf "    $(CYAN)make %-15s$(RESET)  %s\n" "pg-reset"  "Drop data & restart"
+	@printf "    $(CYAN)make %-15s$(RESET)  %s\n" "dev-pg"    "PG + gateway + webchat"
 	@echo ""
 	@echo "  $(BOLD)🔧 Build"
 	@printf "    $(CYAN)make %-15s$(RESET)  %s\n" "build"          "Build binary"

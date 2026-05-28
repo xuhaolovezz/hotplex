@@ -3,8 +3,12 @@ package security
 import (
 	"context"
 	"database/sql"
+	"errors"
+	"log/slog"
 	"sync"
 	"time"
+
+	"github.com/hrygo/hotplex/internal/dbutil"
 )
 
 // APIKeyResolver maps an API key to a user identity.
@@ -51,12 +55,13 @@ func (r *MapResolver) Update(data map[string]string) {
 	r.mu.Unlock()
 }
 
-// DBResolver resolves API keys from a SQLite database.
+// DBResolver resolves API keys from the api_key_users table.
 // Uses an in-memory cache with TTL to avoid repeated DB queries on hot keys.
-// Used when enterprise deployments manage key→user mappings via Admin API.
+// Supports both SQLite and PostgreSQL via dialect-aware query rebinding.
 type DBResolver struct {
-	db    *sql.DB
-	cache sync.Map // key → *cacheEntry
+	db      *sql.DB
+	dialect dbutil.Dialect
+	cache   sync.Map // key → *cacheEntry
 }
 
 type cacheEntry struct {
@@ -66,8 +71,8 @@ type cacheEntry struct {
 
 // NewDBResolver creates a resolver backed by the api_key_users table.
 // The table must exist (created by migration 010).
-func NewDBResolver(db *sql.DB) *DBResolver {
-	return &DBResolver{db: db}
+func NewDBResolver(db *sql.DB, dialect dbutil.Dialect) *DBResolver {
+	return &DBResolver{db: db, dialect: dialect}
 }
 
 // Invalidate removes a cached entry. Called by Admin API after CUD operations.
@@ -90,10 +95,13 @@ func (r *DBResolver) Resolve(ctx context.Context, key string) (string, bool) {
 
 	var userID string
 	err := r.db.QueryRowContext(ctx,
-		"SELECT user_id FROM api_key_users WHERE api_key = ?",
+		r.dialect.Rebind("SELECT user_id FROM api_key_users WHERE api_key = ?"),
 		key,
 	).Scan(&userID)
 	if err != nil {
+		if !errors.Is(err, sql.ErrNoRows) {
+			slog.Warn("security: DBResolver query failed", "error", err)
+		}
 		return "", false
 	}
 	// Cache for 60 seconds — balances freshness with DB load.

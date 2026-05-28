@@ -17,6 +17,7 @@ func helperDB(t *testing.T) (*SQLiteStore, *config.Config) {
 	t.Helper()
 	cfg := config.Default()
 	cfg.DB.Path = filepath.Join(t.TempDir(), "test.db")
+	cfg.DB.SQLite.Path = cfg.DB.Path
 	cfg.DB.WALMode = true
 
 	store, err := NewSQLiteStore(context.Background(), cfg, nil)
