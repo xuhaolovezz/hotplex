@@ -156,6 +156,8 @@ func buildDeliverySuffix(job *CronJob) string {
 		return buildSlackDelivery(job)
 	case "feishu":
 		return buildFeishuDelivery(job)
+	case "yuanxin":
+		return buildYuanxinDelivery(job)
 	default:
 		return ""
 	}
@@ -184,6 +186,15 @@ func buildFeishuDelivery(job *CronJob) string {
 	} else {
 		cmd = fmt.Sprintf("lark-cli im +messages-send --as bot --chat-id %s --markdown \"结果内容\"", chatID)
 	}
+	return fmt.Sprintf(deliveryBlockFmt, job.Name, cmd)
+}
+
+func buildYuanxinDelivery(job *CronJob) string {
+	messageID := job.PlatformKey[RequiredPlatformKey["yuanxin"]]
+	if messageID == "" {
+		return ""
+	}
+	cmd := fmt.Sprintf("hotplex yuanxin send-result --message-id %s --text \"结果内容\"", messageID)
 	return fmt.Sprintf(deliveryBlockFmt, job.Name, cmd)
 }
 
