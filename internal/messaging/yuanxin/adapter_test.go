@@ -474,6 +474,26 @@ func TestYuanxinConn_DoneSendsAccumulatedText(t *testing.T) {
 	require.Equal(t, "", got)
 }
 
+func TestAdapter_SendCronResult_MissingMessageId(t *testing.T) {
+	t.Parallel()
+	a := newTestAdapter()
+
+	err := a.SendCronResult(context.Background(), "hello", map[string]string{})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "missing messageId")
+}
+
+func TestAdapter_SendCronResult_NoProducer(t *testing.T) {
+	t.Parallel()
+	a := newTestAdapter()
+
+	err := a.SendCronResult(context.Background(), "hello", map[string]string{
+		"messageId": "msg-123",
+	})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "producer not initialized")
+}
+
 func TestYuanxinConn_DoneWithNoAccumulatedText(t *testing.T) {
 	t.Parallel()
 	a := newTestAdapter()

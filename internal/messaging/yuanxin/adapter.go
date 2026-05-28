@@ -46,6 +46,7 @@ type Adapter struct {
 func (a *Adapter) Platform() messaging.PlatformType { return messaging.PlatformYuanxin }
 
 var _ messaging.PlatformAdapterInterface = (*Adapter)(nil)
+var _ messaging.CronResultSender = (*Adapter)(nil)
 
 func (a *Adapter) GetBotID() string { return a.appID }
 
@@ -220,10 +221,8 @@ func (a *Adapter) connect() error {
 
 	producerTopic := ""
 	if strings.Contains(a.producerTopic, "://") {
-		// 如果已经是完整的 topic 地址，直接使用
 		producerTopic = a.producerTopic
 	} else {
-		// 否则拼接完整地址
 		producerTopic = fmt.Sprintf("persistent://%s/%s/%s", a.tenant, a.ns, a.producerTopic)
 	}
 	producer, err := client.CreateProducer(pulsar.ProducerOptions{
@@ -247,6 +246,9 @@ func (a *Adapter) connect() error {
 func (a *Adapter) consumeLoop(ctx context.Context, consumer pulsar.Consumer, done chan struct{}) {
 	defer close(done)
 
+	const maxReceiveRetries = 3
+	receiveRetries := 0
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -259,14 +261,22 @@ func (a *Adapter) consumeLoop(ctx context.Context, consumer pulsar.Consumer, don
 			if ctx.Err() != nil {
 				return
 			}
-			a.Log.Warn("yuanxin: receive error, exiting consume loop", "err", err)
+			receiveRetries++
+			if receiveRetries < maxReceiveRetries {
+				a.Log.Warn("yuanxin: receive error, retrying", "err", err, "attempt", receiveRetries)
+				continue
+			}
+			a.Log.Warn("yuanxin: receive error, max retries exceeded, exiting consume loop", "err", err, "attempts", receiveRetries)
 			return
 		}
+		receiveRetries = 0
 
 		a.Log.Debug("yuanxin: message received from Pulsar", "msg_id", msg.ID().String(), "payload_len", len(msg.Payload()))
 
 		if err := a.handleMessage(ctx, msg); err != nil {
 			a.Log.Error("yuanxin: handle message error", "err", err)
+			consumer.Nack(msg)
+			continue
 		}
 
 		if err := consumer.Ack(msg); err != nil {
@@ -352,6 +362,48 @@ func (a *Adapter) handleMessage(ctx context.Context, msg pulsar.Message) error {
 }
 
 func (a *Adapter) HandleTextMessage(_ context.Context, _, _, _, _, _, _ string) error {
+	return nil
+}
+
+func (a *Adapter) SendCronResult(ctx context.Context, text string, platformKey map[string]string) error {
+	messageID := platformKey["messageId"]
+	if messageID == "" {
+		return fmt.Errorf("yuanxin: missing messageId in platform_key")
+	}
+	text = messaging.SanitizeText(text)
+
+	md := map[string]any{
+		"botId":          a.appID,
+		"messageId":      messageID,
+		"replyUserCodes": platformKey["replyUserCodes"],
+		"sysId":          platformKey["sysId"],
+		"platform":       "yx",
+	}
+	if secret, ok := platformKey["secret"]; ok {
+		md["secret"] = secret
+	}
+
+	response := YuanxinMessage{
+		Metadata: md,
+		Msg:      text,
+	}
+
+	data, err := json.Marshal(response)
+	if err != nil {
+		return fmt.Errorf("yuanxin: marshal cron result: %w", err)
+	}
+
+	a.mu.RLock()
+	producer := a.producer
+	a.mu.RUnlock()
+	if producer == nil {
+		return fmt.Errorf("yuanxin: producer not initialized")
+	}
+
+	_, err = producer.Send(ctx, &pulsar.ProducerMessage{Payload: data})
+	if err != nil {
+		return fmt.Errorf("yuanxin: send cron result: %w", err)
+	}
 	return nil
 }
 

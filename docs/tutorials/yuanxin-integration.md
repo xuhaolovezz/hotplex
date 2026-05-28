@@ -175,7 +175,7 @@ pulsar producer connected  tenant=public  namespace=default
 | `metadata.replyUserCodes` | string | 用户标识，用于会话连续性 |
 | `metadata.sysId` | int | 系统 ID |
 | `metadata.messageId` | string | 消息/会话标识，用于路由响应 |
-| `metadata.secret` | string | 鉴权密钥 |
+| `metadata.secret` | string | 消息扩展字段，原心平台用于消息扩展，传给 Worker 处理 |
 | `metadata.platform` | string | 来源平台标识 |
 | `msg` | string | 用户发送的文本消息内容 |
 
