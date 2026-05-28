@@ -189,6 +189,9 @@ func buildFeishuDelivery(job *CronJob) string {
 	return fmt.Sprintf(deliveryBlockFmt, job.Name, cmd)
 }
 
+// buildYuanxinDelivery returns empty — Yuanxin cron results are delivered
+// exclusively via adapter-level SendCronResult (CronResultSender interface).
+// No CLI delivery command is available for Yuanxin.
 func buildYuanxinDelivery(job *CronJob) string {
 	return ""
 }

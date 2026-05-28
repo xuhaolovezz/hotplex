@@ -243,6 +243,14 @@ func (a *Adapter) connect() error {
 	}
 
 	a.mu.Lock()
+	if a.consumer != nil && a.producer != nil {
+		a.mu.Unlock()
+		producer.Close()
+		consumer.Close()
+		client.Close()
+		a.Log.Debug("yuanxin: connect raced with close, resources already available")
+		return nil
+	}
 	a.client = client
 	a.consumer = consumer
 	a.producer = producer
