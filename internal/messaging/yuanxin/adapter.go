@@ -153,6 +153,7 @@ func (a *Adapter) runConsumer(ctx context.Context) {
 			return
 		case <-done:
 			a.Log.Warn("yuanxin: consume loop exited, reconnecting", "attempt", attempt)
+			a.cleanupConn()
 		}
 	}
 }
@@ -161,6 +162,23 @@ func (a *Adapter) getConnResources() (pulsar.Consumer, pulsar.Producer) {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 	return a.consumer, a.producer
+}
+
+func (a *Adapter) cleanupConn() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.consumer != nil {
+		a.consumer.Close()
+		a.consumer = nil
+	}
+	if a.producer != nil {
+		a.producer.Close()
+		a.producer = nil
+	}
+	if a.client != nil {
+		a.client.Close()
+		a.client = nil
+	}
 }
 
 func (a *Adapter) connect() error {
@@ -290,13 +308,20 @@ func (a *Adapter) handleMessage(ctx context.Context, msg pulsar.Message) error {
 		channelID = platformMsgID
 	}
 
+	if a.Gate != nil {
+		if allowed, reason := a.Gate.Check(true, userID, false); !allowed {
+			a.Log.Debug("yuanxin: gate rejected", "reason", reason, "user", userID)
+			return nil
+		}
+	}
+
 	conn := a.GetOrCreateConn(userID, channelID)
 
 	if len(yuanxinMsg.Metadata) > 0 {
 		conn.SetMetadata(yuanxinMsg.Metadata)
 	}
 
-	envelope := a.Bridge().MakeEnvelope(platformMsgID, text, session.PlatformContext{
+	envelope := a.Bridge().MakeEnvelope(userID, text, session.PlatformContext{
 		Platform:  string(messaging.PlatformYuanxin),
 		BotID:     a.appID,
 		ChannelID: channelID,
