@@ -59,6 +59,9 @@ func (a *Adapter) ConfigureWith(config messaging.AdapterConfig) error {
 	if a.pulsarURL == "" {
 		a.pulsarURL = "pulsar://localhost:6650"
 	}
+	if !strings.HasPrefix(a.pulsarURL, "pulsar://") && !strings.HasPrefix(a.pulsarURL, "pulsar+ssl://") {
+		return fmt.Errorf("yuanxin: pulsar_url must start with pulsar:// or pulsar+ssl://")
+	}
 	a.tenant = config.ExtrasString("tenant")
 	if a.tenant == "" {
 		a.tenant = "public"
@@ -155,9 +158,15 @@ func (a *Adapter) runConsumer(ctx context.Context) {
 
 		select {
 		case <-ctx.Done():
+			a.mu.Lock()
+			a.consumerDone = nil
+			a.mu.Unlock()
 			return
 		case <-done:
 			a.Log.Warn("yuanxin: consume loop exited, reconnecting", "attempt", attempt)
+			a.mu.Lock()
+			a.consumerDone = nil
+			a.mu.Unlock()
 			a.cleanupConn()
 		}
 	}
@@ -315,17 +324,18 @@ func (a *Adapter) handleMessage(ctx context.Context, msg pulsar.Message) error {
 	}
 
 	userID := metadataString(yuanxinMsg.Metadata, "replyUserCodes")
-	channelID := metadataString(yuanxinMsg.Metadata, "messageId")
 	if userID == "" {
 		userID = platformMsgID
 	}
+	channelID := userID
 	if channelID == "" {
 		channelID = platformMsgID
 	}
 
 	if a.Gate != nil {
-		if allowed, reason := a.Gate.Check(true, userID, false); !allowed {
-			a.Log.Debug("yuanxin: gate rejected", "reason", reason, "user", userID)
+		allowed, reason := a.Gate.Check(true, userID, false)
+		a.Log.Debug("yuanxin: gate check", "allowed", allowed, "reason", reason, "user", userID)
+		if !allowed {
 			return nil
 		}
 	}
@@ -426,13 +436,15 @@ func metadataString(md map[string]any, key string) string {
 func (a *Adapter) Close(ctx context.Context) error {
 	a.Log.Info("yuanxin: adapter closing")
 
-	if a.cancelFunc != nil {
-		a.cancelFunc()
+	a.mu.Lock()
+	cancel := a.cancelFunc
+	done := a.consumerDone
+	a.mu.Unlock()
+
+	if cancel != nil {
+		cancel()
 	}
 
-	a.mu.RLock()
-	done := a.consumerDone
-	a.mu.RUnlock()
 	if done != nil {
 		select {
 		case <-done:
@@ -522,9 +534,15 @@ func NewYuanxinConn(adapter *Adapter, channelID, threadKey, workDir string) *Yua
 }
 
 func (c *YuanxinConn) SetMetadata(md map[string]any) {
+	if md == nil {
+		return
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.metadata = md
+	c.metadata = make(map[string]any, len(md))
+	for k, v := range md {
+		c.metadata[k] = v
+	}
 }
 
 func (c *YuanxinConn) GetMetadata() map[string]any {

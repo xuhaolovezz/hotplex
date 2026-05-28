@@ -13,7 +13,7 @@ import (
 var RequiredPlatformKey = map[string]string{
 	"feishu":  "chat_id",
 	"slack":   "channel_id",
-	"yuanxin": "messageId",
+	"yuanxin": "message_id",
 }
 
 var threatPatterns = []string{

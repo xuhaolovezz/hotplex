@@ -38,7 +38,7 @@ func (p PlatformType) ExtractPlatformKeys(md map[string]any) map[string]string {
 		}
 	case PlatformYuanxin:
 		if v, ok := md["messageId"].(string); ok && v != "" {
-			pk["messageId"] = v
+			pk["message_id"] = v
 		}
 		if v, ok := md["replyUserCodes"].(string); ok && v != "" {
 			pk["replyUserCodes"] = v
