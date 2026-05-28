@@ -3,6 +3,8 @@ package security
 import (
 	"context"
 	"database/sql"
+	"errors"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -97,6 +99,9 @@ func (r *DBResolver) Resolve(ctx context.Context, key string) (string, bool) {
 		key,
 	).Scan(&userID)
 	if err != nil {
+		if !errors.Is(err, sql.ErrNoRows) {
+			slog.Warn("security: DBResolver query failed", "error", err)
+		}
 		return "", false
 	}
 	// Cache for 60 seconds — balances freshness with DB load.
