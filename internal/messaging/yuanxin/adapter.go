@@ -449,12 +449,13 @@ func (a *Adapter) SendResponse(ctx context.Context, conn *YuanxinConn, content s
 }
 
 type YuanxinConn struct {
-	adapter   *Adapter
-	channelID string
-	threadKey string
-	workDir   string
-	metadata  map[string]any
-	mu        sync.RWMutex
+	adapter         *Adapter
+	channelID       string
+	threadKey       string
+	workDir         string
+	metadata        map[string]any
+	accumulatedText string
+	mu              sync.RWMutex
 }
 
 func NewYuanxinConn(adapter *Adapter, channelID, threadKey, workDir string) *YuanxinConn {
@@ -496,9 +497,19 @@ func (c *YuanxinConn) WriteCtx(ctx context.Context, env *events.Envelope) error 
 	switch env.Event.Type {
 	case events.Done:
 		c.adapter.Interactions.CancelAll(env.SessionID)
-		return nil
+		c.mu.Lock()
+		text := c.accumulatedText
+		c.accumulatedText = ""
+		c.mu.Unlock()
+		if text == "" {
+			return nil
+		}
+		return c.adapter.SendResponse(ctx, c, text)
 	case events.Error:
 		c.adapter.Interactions.CancelAll(env.SessionID)
+		c.mu.Lock()
+		c.accumulatedText = ""
+		c.mu.Unlock()
 		if errMsg := messaging.ExtractErrorMessage(env); errMsg != "" {
 			return c.adapter.SendResponse(ctx, c, errMsg)
 		}
@@ -512,6 +523,11 @@ func (c *YuanxinConn) WriteCtx(ctx context.Context, env *events.Envelope) error 
 	case events.ContextUsage:
 		return c.sendContextUsage(ctx, env)
 	case events.MessageDelta:
+		if d, ok := env.Event.Data.(events.MessageDeltaData); ok && d.Content != "" {
+			c.mu.Lock()
+			c.accumulatedText += d.Content
+			c.mu.Unlock()
+		}
 		return nil
 	}
 

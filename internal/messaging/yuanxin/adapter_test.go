@@ -410,3 +410,108 @@ func TestAdapter_GetConnResources_NilFields(t *testing.T) {
 	require.Nil(t, consumer)
 	require.Nil(t, producer)
 }
+
+func TestYuanxinConn_DeltaAccumulation(t *testing.T) {
+	t.Parallel()
+	a := newTestAdapter()
+	conn := NewYuanxinConn(a, "ch", "thread", "/tmp")
+
+	err := conn.WriteCtx(context.Background(), &events.Envelope{
+		Event: events.Event{
+			Type: events.MessageDelta,
+			Data: events.MessageDeltaData{Content: "Hello"},
+		},
+	})
+	require.NoError(t, err)
+
+	err = conn.WriteCtx(context.Background(), &events.Envelope{
+		Event: events.Event{
+			Type: events.MessageDelta,
+			Data: events.MessageDeltaData{Content: " World"},
+		},
+	})
+	require.NoError(t, err)
+
+	conn.mu.RLock()
+	got := conn.accumulatedText
+	conn.mu.RUnlock()
+	require.Equal(t, "Hello World", got)
+}
+
+func TestYuanxinConn_DoneSendsAccumulatedText(t *testing.T) {
+	t.Parallel()
+	a := newTestAdapter()
+	conn := NewYuanxinConn(a, "ch", "thread", "/tmp")
+
+	err := conn.WriteCtx(context.Background(), &events.Envelope{
+		SessionID: "sess-1",
+		Event: events.Event{
+			Type: events.MessageDelta,
+			Data: events.MessageDeltaData{Content: "Hello "},
+		},
+	})
+	require.NoError(t, err)
+
+	err = conn.WriteCtx(context.Background(), &events.Envelope{
+		SessionID: "sess-1",
+		Event: events.Event{
+			Type: events.MessageDelta,
+			Data: events.MessageDeltaData{Content: "World"},
+		},
+	})
+	require.NoError(t, err)
+
+	err = conn.WriteCtx(context.Background(), &events.Envelope{
+		SessionID: "sess-1",
+		Event:     events.Event{Type: events.Done},
+	})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "producer not initialized")
+
+	conn.mu.RLock()
+	got := conn.accumulatedText
+	conn.mu.RUnlock()
+	require.Equal(t, "", got)
+}
+
+func TestYuanxinConn_DoneWithNoAccumulatedText(t *testing.T) {
+	t.Parallel()
+	a := newTestAdapter()
+	conn := NewYuanxinConn(a, "ch", "thread", "/tmp")
+
+	err := conn.WriteCtx(context.Background(), &events.Envelope{
+		SessionID: "sess-1",
+		Event:     events.Event{Type: events.Done},
+	})
+	require.NoError(t, err)
+}
+
+func TestYuanxinConn_ErrorClearsAccumulatedText(t *testing.T) {
+	t.Parallel()
+	a := newTestAdapter()
+	conn := NewYuanxinConn(a, "ch", "thread", "/tmp")
+
+	err := conn.WriteCtx(context.Background(), &events.Envelope{
+		SessionID: "sess-1",
+		Event: events.Event{
+			Type: events.MessageDelta,
+			Data: events.MessageDeltaData{Content: "some text"},
+		},
+	})
+	require.NoError(t, err)
+
+	err = conn.WriteCtx(context.Background(), &events.Envelope{
+		SessionID: "sess-1",
+		Event: events.Event{
+			Type: events.Error,
+			Data: events.ErrorData{Message: "boom"},
+		},
+	})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "producer not initialized")
+
+	conn.mu.RLock()
+	got := conn.accumulatedText
+	conn.mu.RUnlock()
+	require.Equal(t, "", got)
+}
